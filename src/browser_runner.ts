@@ -205,7 +205,9 @@ export async function runJobSearch(
       "--disable-blink-features=AutomationControlled",
       "--no-sandbox",
       "--disable-setuid-sandbox",
-      "--disable-infobars",
+      "--disable-dev-shm-usage",
+      "--disable-accelerated-2d-canvas",
+      "--disable-gpu",
       "--window-size=1920,1080",
     ],
     viewport: { width: 1280, height: 800 },
@@ -219,7 +221,6 @@ export async function runJobSearch(
   try {
     context = await chromium.launchPersistentContext(profileDir, {
       ...launchOptions,
-      channel: "chrome",
     });
   } catch (err) {
     context = await chromium.launchPersistentContext(profileDir, launchOptions);
@@ -230,12 +231,15 @@ export async function runJobSearch(
   });
 
   const page = await context.newPage();
+  await page.setExtraHTTPHeaders({
+    "Accept-Language": "en-US,en;q=0.9",
+  });
+
   const allJobs: CombinedJob[] = [];
 
   for (const keyword of options.keywords) {
     log(`\n=== KEYWORD: "${keyword.toUpperCase()}" ===`);
 
-    // Build encoded search URL directly for fast and bulletproof navigation
     const keywordSlug = encodeURIComponent(keyword.trim().toLowerCase());
     let targetUrl = `https://www.naukri.com/${keywordSlug.replace(/%20/g, "-")}-jobs?k=${keywordSlug}&sort=f`;
     if (options.jobType === "internship") {
@@ -244,10 +248,14 @@ export async function runJobSearch(
 
     log(`Navigating to search URL: ${targetUrl}`);
     await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(3500);
+    await page.waitForTimeout(4000);
+
+    // Scroll slightly to trigger any lazy-loaded DOM elements
+    await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
+    await page.waitForTimeout(1500);
 
     // Fallback: ONLY if direct URL redirected to non-SRP page (like homepage or login)
-    if (page.url().includes("/jobs-in-") || page.url() === "https://www.naukri.com/" || page.url().includes("/mnjuser/")) {
+    if (page.url() === "https://www.naukri.com/" || page.url().includes("/mnjuser/")) {
       const searchInput = page.getByPlaceholder("Enter keyword / designation / companies")
         .or(page.locator('input[placeholder*="keyword"]'))
         .or(page.locator('.suggestor-input input'))
@@ -265,21 +273,10 @@ export async function runJobSearch(
       }
     }
 
-    try {
-      const sortDropdown = page.locator("button, div, span").filter({ hasText: /^Sort by:/i }).first();
-      if (await sortDropdown.isVisible().catch(() => false)) {
-        await sortDropdown.click({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(500);
-        await page.getByText("Date", { exact: true }).click({ timeout: 3000 }).catch(() => {});
-        await page.waitForTimeout(2000);
-        log("Applied 'Sort by: Date' filter.");
-      }
-    } catch (err) {}
-
     const allJobListings: any[] = [];
     let pageNumber = 1;
 
-    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple, div.tuple, div[class*='tuple'], div[class*='Tuple'], div[class*='card']";
+    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple, div.tuple";
 
     while (pageNumber <= options.maxPages) {
       try {
