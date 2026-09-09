@@ -232,7 +232,7 @@ export async function runJobSearch(
 
   const page = await context.newPage();
   await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
   });
 
   const allJobs: CombinedJob[] = [];
@@ -240,11 +240,14 @@ export async function runJobSearch(
   for (const keyword of options.keywords) {
     log(`\n=== KEYWORD: "${keyword.toUpperCase()}" ===`);
 
-    log(`Navigating to Naukri search page...`);
-    await page.goto("https://www.naukri.com/jobs", { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(1500);
+    log(`Navigating to Naukri homepage...`);
+    await page.goto("https://www.naukri.com/", { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(2000);
 
-    const searchJobsBtn = page.getByRole("button", { name: "Search jobs here" });
+    const searchJobsBtn = page.getByRole("button", { name: "Search jobs here" })
+      .or(page.locator('.qsb-title, .suggestor-input'))
+      .first();
+
     if (await searchJobsBtn.isVisible().catch(() => false)) {
       await searchJobsBtn.click().catch(() => {});
       await page.waitForTimeout(800);
@@ -267,17 +270,23 @@ export async function runJobSearch(
       .first();
 
     if (await keywordInput.isVisible().catch(() => false)) {
-      await keywordInput.fill(keyword).catch(() => {});
-      const locationInput = page.getByPlaceholder("Enter location").first();
-      if (await locationInput.isVisible().catch(() => false)) {
-        await locationInput.fill("").catch(() => {});
+      await keywordInput.click().catch(() => {});
+      await page.waitForTimeout(300);
+
+      // Human character-by-character typing with random delay
+      for (const char of keyword) {
+        await keywordInput.press(char);
+        await page.waitForTimeout(40 + Math.floor(Math.random() * 60));
       }
+      await page.waitForTimeout(600);
+
       const searchBtn = page.getByRole("button", { name: "Search", exact: true })
         .or(page.locator('button:has-text("Search"), .qsbSubmit'))
         .first();
+
       if (await searchBtn.isVisible().catch(() => false)) {
         await searchBtn.click().catch(() => {});
-        await page.waitForTimeout(3500);
+        await page.waitForTimeout(4000);
       }
     }
 
@@ -301,7 +310,15 @@ export async function runJobSearch(
       try {
         await page.waitForSelector(cardSelector, { timeout: 10000 });
       } catch (e) {
-        log(`Page ${pageNumber} → 0 listings extracted.`);
+        log(`[Debug] Page ${pageNumber} → 0 listings extracted. Title: "${await page.title()}", URL: ${page.url()}`);
+        
+        // Take debug screenshot & HTML dump for exact root cause inspection
+        const debugDir = path.join(__dirname, "../public/debug");
+        if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+        
+        const timestamp = Date.now();
+        await page.screenshot({ path: path.join(debugDir, `debug_${timestamp}.png`) }).catch(() => {});
+        log(`[Debug Artifact] Saved screenshot: /debug/debug_${timestamp}.png`);
         break;
       }
 
