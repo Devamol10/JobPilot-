@@ -1,5 +1,5 @@
 import { chromium, Page } from "playwright";
-import { rankJobs } from "./ranker";
+import { rankJobs, FinalRankedJob } from "./ranker";
 
 export interface SearchOptions {
   keywords: string[];
@@ -58,7 +58,7 @@ export interface SearchDiagnostics {
 }
 
 export interface SearchRunResult {
-  jobs: CombinedJob[];
+  jobs: FinalRankedJob[];
   diagnostics: SearchDiagnostics[];
   logs: string[];
 }
