@@ -1,5 +1,8 @@
 import { chromium, Page } from "playwright";
 import { rankJobs, FinalRankedJob } from "./ranker";
+import fs from "fs";
+import os from "os";
+import path from "path";
 
 export interface SearchOptions {
   keywords: string[];
@@ -208,13 +211,18 @@ export async function runJobSearch(
     viewport: { width: 1280, height: 800 },
   };
 
+  const profileDir = path.join(os.tmpdir(), "jobpilot-browser-profile");
+  if (!fs.existsSync(profileDir)) {
+    fs.mkdirSync(profileDir, { recursive: true });
+  }
+
   try {
-    context = await chromium.launchPersistentContext("./browser-profile", {
+    context = await chromium.launchPersistentContext(profileDir, {
       ...launchOptions,
       channel: "chrome",
     });
   } catch (err) {
-    context = await chromium.launchPersistentContext("./browser-profile", launchOptions);
+    context = await chromium.launchPersistentContext(profileDir, launchOptions);
   }
 
   await context.addInitScript(() => {
