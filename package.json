@@ -1,0 +1,22 @@
+{
+  "name": "jobpilot",
+  "version": "1.0.0",
+  "description": "Automated Naukri job search, filtering, and intelligent ranking engine with a web dashboard",
+  "private": true,
+  "dependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "playwright": "^1.63.0"
+  },
+  "scripts": {
+    "start": "tsx src/server.ts",
+    "dev": "tsx src/server.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "tsx": "^4.23.13",
+    "typescript": "^7.0.2"
+  }
+}

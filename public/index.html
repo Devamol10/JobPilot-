@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>JobPilot — Intelligent Job Automation</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sleek Header -->
+    <header class="app-header">
+      <div class="logo-area">
+        <div class="logo-badge">
+          <svg viewBox="0 0 24 24">
+            <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+          </svg>
+        </div>
+        <div>
+          <h1>JobPilot</h1>
+          <p class="subtitle">Automated Job Search & Intelligent Ranking Engine</p>
+        </div>
+      </div>
+      <div class="status-badge" id="globalStatus">
+        <span class="dot idle"></span> Ready
+      </div>
+    </header>
+
+    <main class="dashboard-grid">
+      <!-- Search & Filter Controls Panel -->
+      <section class="panel control-panel">
+        <h2>Search Parameters</h2>
+        
+        <form id="searchForm">
+          <!-- Role Selection Dropdown -->
+          <div class="form-group">
+            <label for="roleDropdown">Target Keywords / Roles</label>
+            <div class="custom-select-wrapper">
+              <select id="roleDropdown" class="form-select">
+                <option value="preset_tech">Software & Web Roles (Software Eng, Full Stack, MERN)</option>
+                <option value="Software Engineer">Software Engineer / SDE</option>
+                <option value="Full Stack Developer">Full Stack Developer</option>
+                <option value="MERN Developer">MERN Stack Developer</option>
+                <option value="Frontend Developer">Frontend / React Developer</option>
+                <option value="Backend Developer">Backend / Node.js Developer</option>
+                <option value="custom">Custom Keywords...</option>
+              </select>
+            </div>
+            <div id="customKeywordContainer" class="hidden input-sub">
+              <input type="text" id="customKeywords" class="form-input" placeholder="e.g. Data Analyst, Python Developer, AI Engineer (comma separated)">
+            </div>
+          </div>
+
+          <!-- Opportunity Type -->
+          <div class="form-group">
+            <label for="jobType">Opportunity Type</label>
+            <select id="jobType" class="form-select">
+              <option value="fulltime" selected>Job</option>
+              <option value="internship">Internship</option>
+            </select>
+          </div>
+
+          <div class="form-row">
+            <!-- Minimum Rating Dropdown -->
+            <div class="form-group">
+              <label for="minRating">Minimum Company Rating</label>
+              <select id="minRating" class="form-select">
+                <option value="">Any Rating</option>
+                <option value="3.0">3.0 & Above</option>
+                <option value="3.5" selected>3.5 & Above (Recommended)</option>
+                <option value="4.0">4.0 & Above</option>
+                <option value="4.5">4.5 & Above</option>
+              </select>
+            </div>
+
+            <!-- Minimum Reviews Dropdown -->
+            <div class="form-group">
+              <label for="minReviews">Minimum Company Reviews</label>
+              <select id="minReviews" class="form-select">
+                <option value="">Any Reviews</option>
+                <option value="10">10+ Reviews</option>
+                <option value="25">25+ Reviews</option>
+                <option value="50" selected>50+ Reviews (Recommended)</option>
+                <option value="100">100+ Reviews</option>
+                <option value="500">500+ Reviews</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <!-- Minimum Stipend Dropdown -->
+            <div class="form-group">
+              <label for="minStipend">Minimum Salary / Stipend</label>
+              <select id="minStipend" class="form-select">
+                <option value="">Any Amount</option>
+                <option value="2000" selected>> ₹2,000 / month</option>
+                <option value="5000">> ₹5,000 / month</option>
+                <option value="10000">> ₹10,000 / month</option>
+                <option value="20000">> ₹20,000 / month</option>
+                <option value="30000">> ₹30,000 / month</option>
+              </select>
+            </div>
+
+            <!-- Max Posting Age Dropdown -->
+            <div class="form-group">
+              <label for="maxDaysOld">Job Freshness</label>
+              <select id="maxDaysOld" class="form-select">
+                <option value="1">Posted Today</option>
+                <option value="3">Past 3 Days</option>
+                <option value="7">Past 7 Days</option>
+                <option value="14" selected>Past 14 Days (Default)</option>
+                <option value="30">Past 30 Days</option>
+                <option value="">Any Time</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-row">
+            <!-- Max Pages Dropdown -->
+            <div class="form-group">
+              <label for="maxPages">Pages to Scan</label>
+              <select id="maxPages" class="form-select">
+                <option value="1">1 Page (~20 listings)</option>
+                <option value="3">3 Pages (~60 listings)</option>
+                <option value="5" selected>5 Pages (~100 listings)</option>
+                <option value="10">10 Pages (~200 listings)</option>
+              </select>
+            </div>
+
+            <!-- Browser Headless Mode -->
+            <div class="form-group">
+              <label for="headless">Browser Mode</label>
+              <select id="headless" class="form-select">
+                <option value="false" selected>Visible Browser Window</option>
+                <option value="true">Background (Headless)</option>
+              </select>
+            </div>
+          </div>
+
+          <button type="submit" id="startBtn" class="btn-primary">
+            Start Job Search
+          </button>
+        </form>
+      </section>
+
+      <!-- Live Terminal & Automation Logs Panel -->
+      <section class="panel logs-panel">
+        <div class="panel-header">
+          <h2>Automation Console</h2>
+          <span id="logCount" class="badge">0 logs</span>
+        </div>
+
+        <div class="terminal-window">
+          <div class="terminal-header">
+            <div class="window-dots">
+              <span class="dot-btn dot-red"></span>
+              <span class="dot-btn dot-yellow"></span>
+              <span class="dot-btn dot-green"></span>
+            </div>
+            <span class="terminal-title">automation.log</span>
+          </div>
+          <div class="terminal-box" id="terminalOutput">
+            <div class="log-line text-muted">Waiting for search initialization...</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Qualified Jobs Results Panel -->
+      <section class="panel results-panel full-width">
+        <div class="panel-header">
+          <h2>Top Ranked Opportunities (<span id="jobsCount">0</span> Found)</h2>
+          <div id="diagnosticsSummary" class="diagnostics-bar"></div>
+        </div>
+
+        <div id="noResultsState" class="empty-state">
+          <p>No jobs extracted yet. Set your parameters above and click <strong>Start Job Search</strong>.</p>
+        </div>
+
+        <div id="jobsTableWrapper" class="table-responsive hidden">
+          <table class="jobs-table">
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Score</th>
+                <th>Job Title & Company</th>
+                <th>Salary / Stipend</th>
+                <th>Rating & Reviews</th>
+                <th>Posted</th>
+                <th>Matched Keywords</th>
+                <th>Action</th>
+              </tr>
+            </thead>
+            <tbody id="jobsTableBody">
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

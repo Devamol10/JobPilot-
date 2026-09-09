@@ -1,0 +1,11 @@
+node_modules/
+browser-profile/
+.env
+.env.local
+*.log
+.git/
+.gitignore
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
