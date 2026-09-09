@@ -1,5 +1,5 @@
 # Use official Microsoft Playwright image (includes Node & Chromium browser dependencies)
-FROM mcr.microsoft.com/playwright:v1.45.0-jammy
+FROM mcr.microsoft.com/playwright:v1.50.0-jammy
 
 WORKDIR /app
 
@@ -8,6 +8,9 @@ COPY package*.json ./
 
 # Install dependencies
 RUN npm ci
+
+# Ensure matching Playwright Chromium binary is installed
+RUN npx playwright install --with-deps chromium
 
 # Copy full application code
 COPY . .
