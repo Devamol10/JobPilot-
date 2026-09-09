@@ -244,45 +244,42 @@ export async function runJobSearch(
 
     log(`Navigating to search URL: ${targetUrl}`);
     await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(3500);
 
-    // Fallback: Check if search input exists if direct URL redirected to homepage
-    const searchInput = page.getByPlaceholder("Enter keyword / designation / companies")
-      .or(page.locator('input[placeholder*="keyword"]'))
-      .or(page.locator('.suggestor-input input'))
-      .first();
-
-    if (await searchInput.isVisible().catch(() => false)) {
-      await searchInput.fill(keyword).catch(() => {});
-      const searchBtn = page.getByRole("button", { name: "Search", exact: true })
-        .or(page.locator('button:has-text("Search"), .qsbSubmit'))
+    // Fallback: ONLY if direct URL redirected to non-SRP page (like homepage or login)
+    if (page.url().includes("/jobs-in-") || page.url() === "https://www.naukri.com/" || page.url().includes("/mnjuser/")) {
+      const searchInput = page.getByPlaceholder("Enter keyword / designation / companies")
+        .or(page.locator('input[placeholder*="keyword"]'))
+        .or(page.locator('.suggestor-input input'))
         .first();
-      if (await searchBtn.isVisible().catch(() => false)) {
-        await searchBtn.click().catch(() => {});
-        await page.waitForTimeout(3000);
+
+      if (await searchInput.isVisible().catch(() => false)) {
+        await searchInput.fill(keyword).catch(() => {});
+        const searchBtn = page.getByRole("button", { name: "Search", exact: true })
+          .or(page.locator('button:has-text("Search"), .qsbSubmit'))
+          .first();
+        if (await searchBtn.isVisible().catch(() => false)) {
+          await searchBtn.click().catch(() => {});
+          await page.waitForTimeout(3000);
+        }
       }
     }
 
     try {
       const sortDropdown = page.locator("button, div, span").filter({ hasText: /^Sort by:/i }).first();
-      await sortDropdown.click({ timeout: 4000 });
-      await page.waitForTimeout(500);
-      await page.getByText("Date", { exact: true }).click({ timeout: 4000 });
-      await page.waitForTimeout(2500);
-      log("Applied 'Sort by: Date' filter.");
-    } catch (err) {
-      try {
-        const url = new URL(page.url());
-        url.searchParams.set("sort", "f");
-        await page.goto(url.toString(), { waitUntil: "domcontentloaded" });
-        await page.waitForTimeout(2500);
-      } catch (e) {}
-    }
+      if (await sortDropdown.isVisible().catch(() => false)) {
+        await sortDropdown.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(500);
+        await page.getByText("Date", { exact: true }).click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        log("Applied 'Sort by: Date' filter.");
+      }
+    } catch (err) {}
 
     const allJobListings: any[] = [];
     let pageNumber = 1;
 
-    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id]";
+    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple";
 
     while (pageNumber <= options.maxPages) {
       try {
