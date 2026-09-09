@@ -8,7 +8,8 @@
     "@types/express": "^5.0.6",
     "cors": "^2.8.6",
     "express": "^5.2.1",
-    "playwright": "^1.63.0"
+    "playwright": "^1.63.0",
+    "tsx": "^4.23.13"
   },
   "scripts": {
     "start": "tsx src/server.ts",
@@ -16,7 +17,6 @@
   },
   "devDependencies": {
     "@types/node": "^26.4.1",
-    "tsx": "^4.23.13",
     "typescript": "^7.0.2"
   }
 }

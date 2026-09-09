@@ -69,8 +69,8 @@ app.post("/api/search", async (req, res) => {
     });
 });
 
-app.listen(PORT, () => {
-  console.log(`\n==================================================`);
-  console.log(`🚀 JobPilot Web UI is live at: http://localhost:${PORT}`);
-  console.log(`==================================================\n`);
+app.listen(Number(PORT), "0.0.0.0", () => {
+  console.log("\n==================================================");
+  console.log(`🚀 JobPilot Web UI is live on port: ${PORT}`);
+  console.log("==================================================\n");
 });
