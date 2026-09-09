@@ -240,38 +240,57 @@ export async function runJobSearch(
   for (const keyword of options.keywords) {
     log(`\n=== KEYWORD: "${keyword.toUpperCase()}" ===`);
 
-    const keywordSlug = encodeURIComponent(keyword.trim().toLowerCase());
-    let targetUrl = `https://www.naukri.com/${keywordSlug.replace(/%20/g, "-")}-jobs?k=${keywordSlug}&sort=f`;
-    if (options.jobType === "internship") {
-      targetUrl = `https://www.naukri.com/${keywordSlug.replace(/%20/g, "-")}-internship-jobs?k=${keywordSlug}&qinternshipFlag=true&naukriCampus=true&sort=f`;
-    }
-
-    log(`Navigating to search URL: ${targetUrl}`);
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(4000);
-
-    // Scroll slightly to trigger any lazy-loaded DOM elements
-    await page.evaluate(() => window.scrollBy(0, 300)).catch(() => {});
+    log(`Navigating to Naukri search page...`);
+    await page.goto("https://www.naukri.com/jobs", { waitUntil: "domcontentloaded" });
     await page.waitForTimeout(1500);
 
-    // Fallback: ONLY if direct URL redirected to non-SRP page (like homepage or login)
-    if (page.url() === "https://www.naukri.com/" || page.url().includes("/mnjuser/")) {
-      const searchInput = page.getByPlaceholder("Enter keyword / designation / companies")
-        .or(page.locator('input[placeholder*="keyword"]'))
-        .or(page.locator('.suggestor-input input'))
-        .first();
+    const searchJobsBtn = page.getByRole("button", { name: "Search jobs here" });
+    if (await searchJobsBtn.isVisible().catch(() => false)) {
+      await searchJobsBtn.click().catch(() => {});
+      await page.waitForTimeout(800);
+    }
 
-      if (await searchInput.isVisible().catch(() => false)) {
-        await searchInput.fill(keyword).catch(() => {});
-        const searchBtn = page.getByRole("button", { name: "Search", exact: true })
-          .or(page.locator('button:has-text("Search"), .qsbSubmit'))
-          .first();
-        if (await searchBtn.isVisible().catch(() => false)) {
-          await searchBtn.click().catch(() => {});
-          await page.waitForTimeout(3000);
-        }
+    if (options.jobType === "internship" || options.jobType === "fulltime") {
+      const jobTypeDropdown = page.locator("#jobType").locator("..");
+      if (await jobTypeDropdown.isVisible().catch(() => false)) {
+        await jobTypeDropdown.click().catch(() => {});
+        await page.waitForTimeout(500);
+        const targetOptionText = options.jobType === "internship" ? "Internship" : "Full Time";
+        await page.getByText(targetOptionText, { exact: true }).click().catch(() => {});
+        log(`Applied '${targetOptionText}' Job Type filter.`);
       }
     }
+
+    const keywordInput = page.getByPlaceholder("Enter keyword / designation / companies")
+      .or(page.locator('input[placeholder*="keyword"]'))
+      .or(page.locator('.suggestor-input input'))
+      .first();
+
+    if (await keywordInput.isVisible().catch(() => false)) {
+      await keywordInput.fill(keyword).catch(() => {});
+      const locationInput = page.getByPlaceholder("Enter location").first();
+      if (await locationInput.isVisible().catch(() => false)) {
+        await locationInput.fill("").catch(() => {});
+      }
+      const searchBtn = page.getByRole("button", { name: "Search", exact: true })
+        .or(page.locator('button:has-text("Search"), .qsbSubmit'))
+        .first();
+      if (await searchBtn.isVisible().catch(() => false)) {
+        await searchBtn.click().catch(() => {});
+        await page.waitForTimeout(3500);
+      }
+    }
+
+    try {
+      const sortDropdown = page.locator("button, div, span").filter({ hasText: /^Sort by:/i }).first();
+      if (await sortDropdown.isVisible().catch(() => false)) {
+        await sortDropdown.click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(500);
+        await page.getByText("Date", { exact: true }).click({ timeout: 3000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        log("Applied 'Sort by: Date' filter.");
+      }
+    } catch (err) {}
 
     const allJobListings: any[] = [];
     let pageNumber = 1;
