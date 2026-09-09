@@ -279,7 +279,7 @@ export async function runJobSearch(
     const allJobListings: any[] = [];
     let pageNumber = 1;
 
-    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple";
+    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple, div.tuple, div[class*='tuple'], div[class*='Tuple'], div[class*='card']";
 
     while (pageNumber <= options.maxPages) {
       try {
@@ -291,11 +291,11 @@ export async function runJobSearch(
 
       const pageListings = await page.locator(cardSelector).evaluateAll((cards) => {
         return cards.map((card) => {
-          const titleEl = card.querySelector('a[href*="/job-listings-"], a.title, .title') as HTMLAnchorElement | null;
+          const titleEl = (card.querySelector('a[href*="/job-listings-"], a[href*="/job/"], a.title, .title, h2, h3, div[class*="title"]') || card.querySelector('a')) as HTMLAnchorElement | null;
           const title = titleEl ? (titleEl.textContent || "").trim() : "";
           const href = titleEl ? titleEl.href : "";
 
-          const companyEl = card.querySelector(".comp-name, .company-name") || card.querySelector("a[href*='-jobs-']");
+          const companyEl = card.querySelector(".comp-name, .company-name, [class*='company'], [class*='compName'], [class*='org']") || card.querySelector("a[href*='-jobs-']");
           const company = companyEl ? (companyEl.textContent || "").trim() : "";
 
           const ratingEl = card.querySelector(".rating, .main-2");
