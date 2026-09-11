@@ -275,6 +275,14 @@ export async function runJobSearch(
     "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
   });
 
+  // Diagnostics Network Response Listener for WAF / IP block detection
+  page.on("response", (response) => {
+    const url = response.url();
+    if (url.includes("/jobapi/") || url.includes("naukri.com/search") || url.includes("cloud-block") || url.includes("challenge")) {
+      log(`[NETWORK LOG] ${response.status()} — ${url}`);
+    }
+  });
+
   const allJobs: CombinedJob[] = [];
 
   for (const keyword of options.keywords) {
