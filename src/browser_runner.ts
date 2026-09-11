@@ -219,6 +219,43 @@ function constructDirectNaukriUrl(keyword: string, jobType: string): string {
   return `https://www.naukri.com/${formattedKeyword}-jobs`;
 }
 
+// Normalise API records once, so downstream filters do not depend on React DOM.
+function listingFromApiJob(job: any): any {
+  const first = (...values: any[]) => values.find((v) => v !== undefined && v !== null && v !== "");
+  const text = (v: any) => typeof v === "string" ? v : (v == null ? "" : String(v));
+  const number = (v: any): number | null => {
+    if (typeof v === "number" && Number.isFinite(v)) return v;
+    const match = text(v).replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+    return match ? Number(match[0]) : null;
+  };
+  const placeholder = (kind: string) => {
+    const item = Array.isArray(job?.placeholders)
+      ? job.placeholders.find((p: any) => text(p?.type || p?.key || p?.name).toLowerCase() === kind)
+      : null;
+    return first(item?.label, item?.value, item?.text);
+  };
+  const url = text(first(job?.jdURL, job?.jdUrl, job?.jobUrl, job?.jobURL, job?.url, job?.seoUrl, ""));
+  const href = url && !/^https?:\/\//i.test(url)
+    ? `https://www.naukri.com${url.startsWith("/") ? "" : "/"}${url}`
+    : url;
+  const postedText = text(first(job?.createdDate, job?.postedDate, job?.postedDateText, job?.footerPlaceholderLabel, ""));
+  const postedMatch = postedText.match(/(\d+)\s*days?\s*ago/i);
+  const salaryText = text(first(job?.salary, job?.salaryDetail, job?.salaryText, job?.salary3, placeholder("salary"), ""));
+
+  return {
+    title: text(first(job?.jobTitle, job?.title, job?.designation, "")),
+    company: text(first(job?.companyName, job?.compName, job?.company?.name, "")),
+    rating: number(first(job?.companyRating, job?.rating, job?.company?.rating)),
+    reviews: number(first(job?.companyReviews, job?.reviews, job?.reviewCount, job?.company?.reviews)),
+    postedDaysAgo: postedMatch ? Number(postedMatch[1]) : (/today|just now|few hours?/i.test(postedText) ? 0 : null),
+    stipend: /unpaid/i.test(salaryText) ? 0 : (/(month|stipend)/i.test(salaryText) ? number(salaryText) : null),
+    experience: text(first(job?.experienceText, job?.experience, job?.exp, placeholder("experience"), "")),
+    location: text(first(job?.location, job?.jobLocation, job?.locationText, placeholder("location"), "")),
+    href,
+    fullText: JSON.stringify(job),
+  };
+}
+
 export async function runJobSearch(
   options: SearchOptions,
   logCallback?: (msg: string) => void
@@ -275,6 +312,10 @@ export async function runJobSearch(
     "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
   });
 
+  // JSON responses are the primary listing source; React card rendering is
+  // asynchronous and selector-dependent.
+  const apiListingsByPage = new Map<number, any[]>();
+  let apiRawSampleLogged = false;
   // Diagnostics Network Response Listener with API body jobCount inspector
   page.on("response", async (response) => {
     const url = response.url();
@@ -284,6 +325,18 @@ export async function runJobSearch(
     if (url.includes("/jobapi/v3/search") || url.includes("/jobapi/")) {
       try {
         const body = (await response.json()) as any;
+        if (url.includes("/jobapi/v3/search")) {
+          const apiPageNo = Number(new URL(url).searchParams.get("pageNo") || "1");
+          const apiJobs = Array.isArray(body?.jobDetails) ? body.jobDetails : [];
+          if (apiJobs.length > 0) {
+            apiListingsByPage.set(apiPageNo, apiJobs.map(listingFromApiJob));
+            log(`[API CAPTURE] pageNo=${apiPageNo} -> ${apiJobs.length} jobs captured`);
+            if (!apiRawSampleLogged) {
+              apiRawSampleLogged = true;
+              log(`[API RAW SAMPLE] ${JSON.stringify(apiJobs[0], null, 2)}`);
+            }
+          }
+        }
         const pageNo = new URL(url).searchParams.get("pageNo") || "1";
         const count = body?.jobDetails?.length ?? body?.noOfJobs ?? "N/A";
         log(`[API BODY LOG] pageNo=${pageNo} → jobCount=${count}`);
@@ -299,6 +352,8 @@ export async function runJobSearch(
   const allJobs: CombinedJob[] = [];
 
   for (const keyword of options.keywords) {
+    apiListingsByPage.clear();
+    apiRawSampleLogged = false;
     log(`\n=== KEYWORD: "${keyword.toUpperCase()}" ===`);
 
     const directUrl = constructDirectNaukriUrl(keyword, options.jobType);
@@ -379,7 +434,10 @@ export async function runJobSearch(
 
     while (pageNumber <= options.maxPages) {
       try {
-        await page.waitForSelector(cardSelector, { timeout: 10000 });
+        // API capture is authoritative. This probe is only a diagnostic fallback.
+        if (!apiListingsByPage.has(pageNumber)) {
+          await page.waitForSelector(cardSelector, { timeout: 100 });
+        }
       } catch (e) {
         log(`[Debug] Page ${pageNumber} → 0 listings extracted. Title: "${await page.title()}", URL: ${page.url()}`);
         
@@ -390,10 +448,10 @@ export async function runJobSearch(
         const timestamp = Date.now();
         await page.screenshot({ path: path.join(debugDir, `debug_${timestamp}.png`) }).catch(() => {});
         log(`[Debug Artifact] Saved screenshot: /debug/debug_${timestamp}.png`);
-        break;
+        // Do not stop: the API response can arrive before React renders cards.
       }
 
-      const pageListings = await page.locator(cardSelector).evaluateAll((cards) => {
+      let pageListings = apiListingsByPage.get(pageNumber) || await page.locator(cardSelector).evaluateAll((cards) => {
         return cards.map((card) => {
           const titleEl = (card.querySelector('a[href*="/job-listings-"], a[href*="/job/"], a.title, .title, h2, h3, div[class*="title"]') || card.querySelector('a')) as HTMLAnchorElement | null;
           const title = titleEl ? (titleEl.textContent || "").trim() : "";
@@ -444,7 +502,18 @@ export async function runJobSearch(
         });
       });
 
+      // Prefer the response captured before this React rendering probe.
+      const capturedApiListings = apiListingsByPage.get(pageNumber);
+      if (capturedApiListings) pageListings = capturedApiListings;
+
       log(`Page ${pageNumber} → ${pageListings.length} listings extracted`);
+      const apiListings = apiListingsByPage.get(pageNumber);
+      if (apiListings) {
+        pageListings = apiListings;
+        log(`[Listing Source] Page ${pageNumber}: API JSON (${pageListings.length} jobs)`);
+      } else {
+        log(`[Listing Source] Page ${pageNumber}: DOM fallback (${pageListings.length} jobs)`);
+      }
       if (pageListings.length === 0) break;
 
       allJobListings.push(...pageListings);
