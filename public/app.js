@@ -70,7 +70,17 @@ document.addEventListener('DOMContentLoaded', () => {
         throw new Error(data.error || 'Failed to start search');
       }
 
-      startStatusPolling();
+      // Production may restart or route polling requests to another instance.
+      // The completed search response is therefore the authoritative result.
+      if (data.result && Array.isArray(data.result.jobs)) {
+        renderLogs(data.result.logs || []);
+        renderResults(data.result.jobs);
+        setRunningState(false);
+        appendLog(`[System] Search completed: ${data.result.jobs.length} qualified job(s) ready.`, 'success');
+      } else {
+        // Backward-compatible fallback for an older asynchronous backend.
+        startStatusPolling();
+      }
     } catch (err) {
       appendLog(`[Error] ${err.message}`, 'error');
       setRunningState(false);

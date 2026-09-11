@@ -64,20 +64,22 @@ app.post("/api/search", async (req, res) => {
   currentLogs = [];
   lastResult = null;
 
-  res.json({ status: "started", options });
-
-  // Run asynchronously in background
-  runJobSearch(options, (logMsg) => {
-    currentLogs.push(logMsg);
-  })
-    .then((result) => {
-      lastResult = result;
-      isRunning = false;
-    })
-    .catch((err) => {
-      currentLogs.push(`[ERROR] Search failed: ${err.message || err}`);
-      isRunning = false;
+  // Return the completed result through this same request. Keeping search
+  // state only in process memory is unreliable in production: a restarted or
+  // load-balanced instance makes a later /api/status poll see empty globals.
+  try {
+    const result = await runJobSearch(options, (logMsg) => {
+      currentLogs.push(logMsg);
     });
+    lastResult = result;
+    isRunning = false;
+    return res.json({ status: "completed", options, result });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    currentLogs.push(`[ERROR] Search failed: ${message}`);
+    isRunning = false;
+    return res.status(500).json({ error: message, logs: currentLogs });
+  }
 });
 
 app.listen(Number(PORT), "0.0.0.0", () => {

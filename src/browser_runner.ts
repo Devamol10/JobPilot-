@@ -684,8 +684,6 @@ export async function runJobSearch(
     });
   }
 
-  await context.close();
-
   // Deduplicate and rank
   const jobMap = new Map<string, CombinedJob>();
   for (const job of allJobs) {
@@ -703,6 +701,12 @@ export async function runJobSearch(
   const finalRanked = rankJobs(uniqueJobs, 20);
 
   log(`\n[Search Completed] Total Qualified & Ranked Jobs: ${finalRanked.length}`);
+
+  // Browser shutdown is cleanup, not part of producing the result. A cleanup
+  // failure must not discard already-qualified jobs before the API returns.
+  await context.close().catch((err) => {
+    log(`[Warning] Browser cleanup failed after ranking: ${err instanceof Error ? err.message : String(err)}`);
+  });
 
   return {
     jobs: finalRanked,
