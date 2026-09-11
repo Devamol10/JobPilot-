@@ -22,3 +22,8 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# Debug artifacts & local worker profiles
+public/debug/
+browser-worker/
+

@@ -1,8 +1,14 @@
-import { chromium, Page } from "playwright";
+import { chromium as extraChromium } from "playwright-extra";
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
+import { Page } from "playwright";
 import { rankJobs, FinalRankedJob } from "./ranker";
 import fs from "fs";
 import os from "os";
 import path from "path";
+
+const stealth = StealthPlugin();
+extraChromium.use(stealth);
+
 
 export interface SearchOptions {
   keywords: string[];
@@ -26,6 +32,7 @@ export interface FullJobDetails {
   keySkills: string[];
   postedAgeText: string | null;
   postedDaysAgo: number | null;
+  isInternship: boolean;
 }
 
 export interface CombinedJob {
@@ -66,42 +73,133 @@ export interface SearchRunResult {
   logs: string[];
 }
 
-export function evaluateFullJobFilters(
-  listing: { rating: number | null; reviews: number | null; stipend: number | null },
-  details: FullJobDetails,
+export function parsePostedAgeText(text: string | null | undefined): number | null {
+  if (!text) return null;
+  const normalized = text.toLowerCase().trim();
+  if (normalized === "today" || normalized === "just now" || /few hours?/.test(normalized)) {
+    return 0;
+  }
+  const daysMatch = normalized.match(/(\d+)\+?\s*days?\s*ago/);
+  if (daysMatch) return Number(daysMatch[1]);
+  const weekMatch = normalized.match(/(\d+)\+?\s*weeks?\s*ago/);
+  if (weekMatch) return Number(weekMatch[1]) * 7;
+  const monthMatch = normalized.match(/(\d+)\+?\s*months?\s*ago/);
+  if (monthMatch) return Number(monthMatch[1]) * 30;
+  return null;
+}
+
+export function detectIsInternship(signals: {
+  title?: string | null;
+  experience?: string | null;
+  employmentType?: string | null;
+  bodyText?: string | null;
+}): boolean {
+  const combined = [signals.employmentType, signals.title, signals.experience, signals.bodyText]
+    .filter(Boolean)
+    .join("\n");
+  return /\binternship\b/i.test(combined) || /\bintern\b/i.test(combined);
+}
+
+export function parseStipendFromSignals(signals: {
+  salaryText?: string | null;
+  bodyText?: string | null;
+  monthlySalary?: number | null;
+}): number | null {
+  const combined = `${signals.salaryText || ""}\n${signals.bodyText || ""}`;
+  if (/\bunpaid\b/i.test(combined)) return 0;
+
+  const salaryText = signals.salaryText || "";
+  if (/(month|stipend|\/\s*mo)/i.test(salaryText)) {
+    const match = salaryText.replace(/,/g, "").match(/\d+(?:\.\d+)?/);
+    if (match) return Number(match[0]);
+  }
+
+  if (signals.bodyText) {
+    const stipendMatch = signals.bodyText.match(
+      /(?:₹|Rs\.?|INR)?\s*([\d,]+)\s*(?:\/\s*month|per month)/i
+    );
+    if (stipendMatch) return parseInt(stipendMatch[1].replace(/,/g, ""), 10);
+  }
+
+  return signals.monthlySalary && signals.monthlySalary > 0 ? signals.monthlySalary : null;
+}
+
+function evaluateListingFilters(
+  job: {
+    rating: number | null;
+    reviews: number | null;
+    stipend: number | null;
+    postedDaysAgo: number | null;
+    title?: string;
+    experience?: string;
+    isInternship?: boolean;
+  },
   options: SearchOptions
-): { passed: boolean; rejectionReasons: string[] } {
-  const rejectionReasons: string[] = [];
+): string[] {
+  const reasons: string[] = [];
 
   if (options.minRating !== null) {
-    if (listing.rating === null) {
-      rejectionReasons.push("rating_unknown");
-    } else if (listing.rating < options.minRating) {
-      rejectionReasons.push(`rating_below_${options.minRating}`);
-    }
+    if (job.rating === null) reasons.push("rating_unknown");
+    else if (job.rating < options.minRating) reasons.push(`rating_below_${options.minRating}`);
   }
 
   if (options.minReviews !== null) {
-    if (listing.reviews === null) {
-      rejectionReasons.push("reviews_unknown");
-    } else if (listing.reviews < options.minReviews) {
-      rejectionReasons.push(`reviews_below_${options.minReviews}`);
-    }
+    if (job.reviews === null) reasons.push("reviews_unknown");
+    else if (job.reviews < options.minReviews) reasons.push(`reviews_below_${options.minReviews}`);
   }
 
   if (options.minStipend !== null) {
-    if (listing.stipend !== null && listing.stipend < options.minStipend) {
-      rejectionReasons.push(`stipend_below_${options.minStipend}`);
-    }
+    if (job.stipend === null) reasons.push("stipend_unknown");
+    else if (job.stipend < options.minStipend) reasons.push(`stipend_below_${options.minStipend}`);
   }
 
   if (options.maxDaysOld !== null) {
-    // Some API records intentionally expose no trustworthy post date (for
-    // example createdDate: 0). Unknown is not evidence that a role is stale.
-    if (details.postedDaysAgo !== null && details.postedDaysAgo > options.maxDaysOld) {
-      rejectionReasons.push(`freshness_older_than_${options.maxDaysOld}_days`);
+    if (job.postedDaysAgo === null) reasons.push("freshness_unknown");
+    else if (job.postedDaysAgo > options.maxDaysOld) {
+      reasons.push(`freshness_older_than_${options.maxDaysOld}_days`);
     }
   }
+
+  if (options.jobType === "internship" && !job.isInternship) {
+    reasons.push("job_type_not_internship");
+  }
+  if (options.jobType === "fulltime" && job.isInternship) {
+    reasons.push("job_type_internship");
+  }
+
+  return reasons;
+}
+
+export function evaluateFullJobFilters(
+  listing: {
+    rating: number | null;
+    reviews: number | null;
+    stipend: number | null;
+    title?: string;
+    experience?: string;
+    isInternship?: boolean;
+  },
+  details: FullJobDetails,
+  options: SearchOptions
+): { passed: boolean; rejectionReasons: string[] } {
+  const isInternship =
+    details.isInternship ||
+    listing.isInternship ||
+    detectIsInternship({
+      title: listing.title,
+      experience: listing.experience,
+      employmentType: details.employmentType,
+      bodyText: details.rawText,
+    });
+
+  const mergedListing = {
+    ...listing,
+    stipend: listing.stipend ?? parseStipendFromSignals({ bodyText: details.rawText }),
+    postedDaysAgo: details.postedDaysAgo,
+    isInternship,
+  };
+
+  const rejectionReasons = evaluateListingFilters(mergedListing, options);
 
   if (!details.description || details.description.length < 20) {
     rejectionReasons.push("missing_or_short_description");
@@ -138,23 +236,35 @@ async function extractJobDetails(page: Page): Promise<FullJobDetails> {
       document.querySelectorAll(".styles_jhc__stat__PgY67")
     ).find((el) => el.querySelector("label")?.textContent?.trim() === "Posted:");
 
-    const postedAgeText = postedStat?.querySelector("span")?.textContent?.trim() ?? null;
+    // Campus and regular Naukri job pages use different markup. Fall back to
+    // visible page text so "Posted: 3+ weeks ago" is never silently unknown.
+    const postedFromBody = bodyText.match(/Posted:\s*([^\n|]+)/i)?.[1]?.trim() ?? null;
+    const postedAgeText = postedStat?.querySelector("span")?.textContent?.trim() ?? postedFromBody;
 
-    let postedDaysAgo: number | null = null;
-    if (postedAgeText) {
-      const text = postedAgeText.toLowerCase();
-      if (text === "today" || text === "just now") {
-        postedDaysAgo = 0;
-      } else {
-        const daysMatch = text.match(/(\d+)\s+days?\s+ago/);
-        const weekMatch = text.match(/(\d+)\+?\s+weeks?\s+ago/);
-        if (daysMatch) {
-          postedDaysAgo = Number(daysMatch[1]);
-        } else if (weekMatch) {
-          postedDaysAgo = Number(weekMatch[1]) * 7;
-        }
+    const parsePostedAgeText = (text: string | null | undefined): number | null => {
+      if (!text) return null;
+      const normalized = text.toLowerCase().trim();
+      if (normalized === "today" || normalized === "just now" || /few hours?/.test(normalized)) {
+        return 0;
       }
-    }
+      const daysMatch = normalized.match(/(\d+)\+?\s*days?\s*ago/);
+      if (daysMatch) return Number(daysMatch[1]);
+      const weekMatch = normalized.match(/(\d+)\+?\s*weeks?\s*ago/);
+      if (weekMatch) return Number(weekMatch[1]) * 7;
+      const monthMatch = normalized.match(/(\d+)\+?\s*months?\s*ago/);
+      if (monthMatch) return Number(monthMatch[1]) * 30;
+      return null;
+    };
+
+    const detectIsInternship = (title: string, experience: string, employmentType: string, pageText: string) => {
+      const combined = [employmentType, title, experience, pageText].filter(Boolean).join("\n");
+      return /\binternship\b/i.test(combined) || /\bintern\b/i.test(combined);
+    };
+
+    const pageTitle =
+      document.querySelector("h1, .styles_jd-header-title__rYwM3, [class*='job-title']")?.textContent?.trim() || "";
+    const postedDaysAgo = parsePostedAgeText(postedAgeText);
+    const employmentType = detailMap["Employment Type"] ?? null;
 
     return {
       rawText: bodyText,
@@ -162,11 +272,12 @@ async function extractJobDetails(page: Page): Promise<FullJobDetails> {
       role: detailMap["Role"] ?? null,
       industry: detailMap["Industry Type"] ?? null,
       department: detailMap["Department"] ?? null,
-      employmentType: detailMap["Employment Type"] ?? null,
+      employmentType,
       roleCategory: detailMap["Role Category"] ?? null,
       keySkills,
       postedAgeText,
       postedDaysAgo,
+      isInternship: detectIsInternship(pageTitle, detailMap["Experience"] || "", employmentType || "", bodyText),
     };
   });
 }
@@ -181,10 +292,9 @@ function getNextPageUrl(urlStr: string, nextPage: number): string {
   }
 }
 
-import { chromium as extraChromium } from "playwright-extra";
-import stealthPlugin from "puppeteer-extra-plugin-stealth";
-
-extraChromium.use(stealthPlugin());
+// Manual stealth scripts injected via addInitScript (no playwright-extra needed)
+// This avoids the __name is not defined error caused by esbuild/tsx bundler
+// leaking helper functions into Playwright's browser-context serialization.
 
 async function solveWithFlareSolverr(targetUrl: string): Promise<{ cookies?: any[]; userAgent?: string; html?: string } | null> {
   const flaresolverrUrl = process.env.FLARESOLVERR_URL || "http://localhost:8191/v1";
@@ -240,23 +350,58 @@ function listingFromApiJob(job: any): any {
   const href = url && !/^https?:\/\//i.test(url)
     ? `https://www.naukri.com${url.startsWith("/") ? "" : "/"}${url}`
     : url;
-  const postedText = text(first(job?.createdDate, job?.postedDate, job?.postedDateText, job?.footerPlaceholderLabel, ""));
-  const postedMatch = postedText.match(/(\d+)\s*days?\s*ago/i);
-  const salaryText = text(first(job?.salary, job?.salaryDetail, job?.salaryText, job?.salary3, placeholder("salary"), ""));
+  const postedText = text(first(job?.footerPlaceholderLabel, job?.postedDateText, job?.postedDate, ""));
+  const relativePostedDays = parsePostedAgeText(postedText);
+  const createdDate = number(job?.createdDate);
+  const createdAtMs = createdDate && createdDate > 0
+    ? (createdDate < 100_000_000_000 ? createdDate * 1000 : createdDate)
+    : null;
+  const createdDaysAgo = createdAtMs && createdAtMs <= Date.now()
+    ? Math.floor((Date.now() - createdAtMs) / 86_400_000)
+    : null;
+  const salaryText = text(first(
+    job?.salary,
+    job?.salaryText,
+    job?.salary3,
+    job?.stipend,
+    job?.stipendText,
+    job?.compensation,
+    placeholder("salary"),
+    placeholder("stipend"),
+    job?.salaryDetail?.label,
+    job?.salaryDetail?.text,
+    ...(Array.isArray(job?.placeholders)
+      ? job.placeholders.map((p: any) => text(first(p?.label, p?.value, p?.text)))
+      : [])
+  ));
+  const rawMonthlySalary = number(first(job?.salaryDetail?.minSalaryPerMonth, job?.salaryDetail?.maxSalaryPerMonth));
+  const monthlySalary = rawMonthlySalary && rawMonthlySalary > 0 ? rawMonthlySalary : null;
+  const title = text(first(job?.jobTitle, job?.title, job?.designation, ""));
+  const experience = text(first(job?.experienceText, job?.experience, job?.exp, placeholder("experience"), ""));
+  const employmentType = text(first(job?.employmentType, job?.jobType, job?.type, ""));
 
   return {
-    title: text(first(job?.jobTitle, job?.title, job?.designation, "")),
+    title,
     company: text(first(job?.companyName, job?.compName, job?.company?.name, "")),
     rating: number(first(job?.ambitionBoxData?.AggregateRating, job?.companyRating, job?.rating, job?.company?.rating)),
     reviews: number(first(job?.ambitionBoxData?.ReviewsCount, job?.companyReviews, job?.reviews, job?.reviewCount, job?.company?.reviews)),
-    postedDaysAgo: postedMatch ? Number(postedMatch[1]) : (/today|just now|few hours?/i.test(postedText) ? 0 : null),
-    stipend: /unpaid/i.test(salaryText) ? 0 : (/(month|stipend)/i.test(salaryText) ? number(salaryText) : null),
-    experience: text(first(job?.experienceText, job?.experience, job?.exp, placeholder("experience"), "")),
+    postedAgeText: postedText || null,
+    postedDaysAgo: relativePostedDays ?? createdDaysAgo,
+    postedFromRelativeText: relativePostedDays !== null,
+    stipend: parseStipendFromSignals({
+      salaryText: /\bunpaid\b/i.test(JSON.stringify(job)) ? `Unpaid\n${salaryText}` : salaryText,
+      monthlySalary,
+    }),
+    experience,
+    isInternship: detectIsInternship({
+      title,
+      experience,
+      employmentType,
+      bodyText: salaryText,
+    }),
     location: text(first(job?.location, job?.jobLocation, job?.locationText, placeholder("location"), "")),
     href,
     jobId: text(first(job?.jobId, job?.jobID, job?.id, href)),
-    // Detail pages can be blocked or incomplete; preserve the API description
-    // as a reliable fallback for qualification.
     apiDescription: text(first(job?.jobDescription, job?.description, job?.jobDesc, "")),
     fullText: JSON.stringify(job),
   };
@@ -309,8 +454,40 @@ export async function runJobSearch(
     context = await extraChromium.launchPersistentContext(profileDir, launchOptions);
   }
 
+  // Stealth polyfill for esbuild __name helper inside browser context
+  await context.addInitScript(() => {
+    if (typeof (window as any).__name === "undefined") {
+      (window as any).__name = (target: any, value: string) => target;
+    }
+  });
+
+  // Manual stealth: hide webdriver flag, fake plugins/languages, patch permissions
   await context.addInitScript(() => {
     Object.defineProperty(navigator, "webdriver", { get: () => false });
+
+    // Fake chrome runtime
+    if (!(window as any).chrome) {
+      (window as any).chrome = { runtime: {}, loadTimes: () => ({}), csi: () => ({}) };
+    }
+
+    // Fake plugins array
+    Object.defineProperty(navigator, "plugins", {
+      get: () => [1, 2, 3, 4, 5].map(() => ({ name: "Chrome PDF Plugin", filename: "internal-pdf-viewer" })),
+    });
+
+    // Fake languages
+    Object.defineProperty(navigator, "languages", {
+      get: () => ["en-IN", "en-US", "en"],
+    });
+
+    // Hide permissions query automation detection
+    const originalQuery = window.navigator.permissions?.query?.bind(window.navigator.permissions);
+    if (originalQuery) {
+      (window.navigator.permissions as any).query = (params: any) =>
+        params.name === "notifications"
+          ? Promise.resolve({ state: "denied" } as PermissionStatus)
+          : originalQuery(params);
+    }
   });
 
   const page = await context.newPage();
@@ -477,30 +654,43 @@ export async function runJobSearch(
             ? parseInt(reviewsMatch[1].replace(/,/g, ""), 10)
             : (fullTextReviewsMatch ? parseInt(fullTextReviewsMatch[1].replace(/,/g, ""), 10) : null);
 
-          const daysAgoMatch = fullText.match(/(\d+)\s*days?\s*ago/i);
-          const postedDaysAgo = daysAgoMatch ? parseInt(daysAgoMatch[1], 10) : (fullText.includes("today") || fullText.includes("just now") ? 0 : null);
-
-          let stipend: number | null = null;
-          if (/unpaid/i.test(fullText)) {
-            stipend = 0;
-          } else {
-            const stipendMatch = fullText.match(/(?:₹|Rs\.?|INR)?\s*([\d,]+)\s*(?:\/\s*month|per month)/i);
-            if (stipendMatch) {
-              stipend = parseInt(stipendMatch[1].replace(/,/g, ""), 10);
+          const postedAgeText =
+            fullText.match(/(\d+\+?\s*(?:days?|weeks?|months?)\s*ago|today|just now)/i)?.[0] ?? null;
+          const parsePostedAgeText = (text: string | null | undefined): number | null => {
+            if (!text) return null;
+            const normalized = text.toLowerCase().trim();
+            if (normalized === "today" || normalized === "just now" || /few hours?/.test(normalized)) {
+              return 0;
             }
-          }
+            const daysMatch = normalized.match(/(\d+)\+?\s*days?\s*ago/);
+            if (daysMatch) return Number(daysMatch[1]);
+            const weekMatch = normalized.match(/(\d+)\+?\s*weeks?\s*ago/);
+            if (weekMatch) return Number(weekMatch[1]) * 7;
+            const monthMatch = normalized.match(/(\d+)\+?\s*months?\s*ago/);
+            if (monthMatch) return Number(monthMatch[1]) * 30;
+            return null;
+          };
+          const postedDaysAgo = parsePostedAgeText(postedAgeText);
+          const stipendMatch = fullText.match(/(?:₹|Rs\.?|INR)?\s*([\d,]+)\s*(?:\/\s*month|per month)/i);
+          const stipend = /\bunpaid\b/i.test(fullText)
+            ? 0
+            : (stipendMatch ? parseInt(stipendMatch[1].replace(/,/g, ""), 10) : null);
 
           const experienceEl = card.querySelector(".exp, .exp-wrap");
           const locationEl = card.querySelector(".loc, .loc-wrap");
+          const experience = experienceEl ? (experienceEl.textContent || "").trim() : "";
 
           return {
             title,
             company,
             rating: ratingEl ? parseFloat(ratingEl.textContent || "") : null,
             reviews: parsedReviews,
+            postedAgeText,
             postedDaysAgo,
+            postedFromRelativeText: postedDaysAgo !== null,
             stipend,
-            experience: experienceEl ? (experienceEl.textContent || "").trim() : "",
+            experience,
+            isInternship: /\binternship\b/i.test(`${title}\n${experience}\n${fullText}`) || /\bintern\b/i.test(`${title}\n${experience}\n${fullText}`),
             location: locationEl ? (locationEl.textContent || "").trim() : "",
             href,
             fullText,
@@ -590,18 +780,7 @@ export async function runJobSearch(
 
     const rejectionCounts: Record<string, number> = {};
     const evaluatedListings = jobListings.map((job) => {
-      const reasons: string[] = [];
-      if (options.minRating !== null) {
-        if (job.rating === null) reasons.push("rating_unknown");
-        else if (job.rating < options.minRating) reasons.push(`rating_below_${options.minRating}`);
-      }
-      if (options.minReviews !== null) {
-        if (job.reviews === null) reasons.push("reviews_unknown");
-        else if (job.reviews < options.minReviews) reasons.push(`reviews_below_${options.minReviews}`);
-      }
-      if (options.minStipend !== null) {
-        if (job.stipend !== null && job.stipend < options.minStipend) reasons.push(`stipend_below_${options.minStipend}`);
-      }
+      const reasons = evaluateListingFilters(job, options);
 
       if (reasons.length > 0) {
         for (const r of reasons) rejectionCounts[r] = (rejectionCounts[r] || 0) + 1;
@@ -632,11 +811,18 @@ export async function runJobSearch(
         details.rawText = `${details.rawText}\n${targetJob.apiDescription}`;
         log(`[Details Fallback] Using API description for "${targetJob.title}".`);
       }
-      if (details.postedDaysAgo === null && targetJob.postedDaysAgo !== null) {
-        details.postedDaysAgo = targetJob.postedDaysAgo;
-        details.postedAgeText = `${targetJob.postedDaysAgo} days ago (API)`;
+      const detailStipend = parseStipendFromSignals({ bodyText: details.rawText });
+      if (targetJob.stipend === null && detailStipend !== null) {
+        targetJob.stipend = detailStipend;
       }
-      log(`[QUALIFY] "${targetJob.title}" -> rating=${targetJob.rating ?? "unknown"}, reviews=${targetJob.reviews ?? "unknown"}, ageDays=${details.postedDaysAgo ?? "unknown"}, descLen=${details.description?.length ?? 0}`);
+      if (details.postedDaysAgo === null && targetJob.postedFromRelativeText && targetJob.postedDaysAgo !== null) {
+        details.postedDaysAgo = targetJob.postedDaysAgo;
+        details.postedAgeText = targetJob.postedAgeText || `${targetJob.postedDaysAgo} days ago (API)`;
+      }
+      if (!details.isInternship && targetJob.isInternship) {
+        details.isInternship = true;
+      }
+      log(`[QUALIFY] "${targetJob.title}" -> rating=${targetJob.rating ?? "unknown"}, reviews=${targetJob.reviews ?? "unknown"}, stipend=${targetJob.stipend ?? "unknown"}, ageDays=${details.postedDaysAgo ?? "unknown"}, internship=${details.isInternship || targetJob.isInternship}, descLen=${details.description?.length ?? 0}`);
       const evalResult = evaluateFullJobFilters(targetJob, details, options);
 
       if (evalResult.passed) {
