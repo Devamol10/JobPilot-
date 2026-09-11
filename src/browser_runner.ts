@@ -254,6 +254,7 @@ function listingFromApiJob(job: any): any {
     experience: text(first(job?.experienceText, job?.experience, job?.exp, placeholder("experience"), "")),
     location: text(first(job?.location, job?.jobLocation, job?.locationText, placeholder("location"), "")),
     href,
+    jobId: text(first(job?.jobId, job?.jobID, job?.id, href)),
     // Detail pages can be blocked or incomplete; preserve the API description
     // as a reliable fallback for qualification.
     apiDescription: text(first(job?.jobDescription, job?.description, job?.jobDesc, "")),
@@ -523,17 +524,6 @@ export async function runJobSearch(
 
       allJobListings.push(...pageListings);
 
-      // CHANGE: Early exit during pagination if any card on current page exceeds maxDaysOld
-      if (options.maxDaysOld !== null) {
-        const olderJob = pageListings.find(
-          (j) => j.postedDaysAgo !== null && j.postedDaysAgo > options.maxDaysOld!
-        );
-        if (olderJob) {
-          log(`[Early Stop] Card "${olderJob.title}" is ${olderJob.postedDaysAgo} days old (> ${options.maxDaysOld} max limit). Since search is sorted by Date, all subsequent pages will be older. Stopping pagination at Page ${pageNumber}.`);
-          break;
-        }
-      }
-
       if (pageNumber < options.maxPages) {
         const nextPageNum = pageNumber + 1;
         let clicked = false;
@@ -591,8 +581,9 @@ export async function runJobSearch(
 
     const uniqueListingMap = new Map<string, any>();
     for (const item of allJobListings) {
-      if (item.href && !uniqueListingMap.has(item.href)) {
-        uniqueListingMap.set(item.href, item);
+      const listingKey = item.jobId || item.href;
+      if (listingKey && !uniqueListingMap.has(listingKey)) {
+        uniqueListingMap.set(listingKey, item);
       }
     }
     const jobListings = Array.from(uniqueListingMap.values());
@@ -679,10 +670,8 @@ export async function runJobSearch(
           rejectionCounts[r] = (rejectionCounts[r] || 0) + 1;
         }
 
-        if (options.maxDaysOld !== null && details.postedDaysAgo !== null && details.postedDaysAgo > options.maxDaysOld) {
-          log(`[Early Exit] Job is ${details.postedDaysAgo} days old (> ${options.maxDaysOld} max limit). Stopping further checks for "${keyword}".`);
-          break;
-        }
+        // Reject only this candidate. API and fallback sources do not promise a
+        // globally date-sorted merged list, so later jobs may still be fresh.
       }
     }
 
