@@ -96,7 +96,9 @@ export function evaluateFullJobFilters(
   }
 
   if (options.maxDaysOld !== null) {
-    if (details.postedDaysAgo === null || details.postedDaysAgo > options.maxDaysOld) {
+    // Some API records intentionally expose no trustworthy post date (for
+    // example createdDate: 0). Unknown is not evidence that a role is stale.
+    if (details.postedDaysAgo !== null && details.postedDaysAgo > options.maxDaysOld) {
       rejectionReasons.push(`freshness_older_than_${options.maxDaysOld}_days`);
     }
   }
@@ -245,13 +247,16 @@ function listingFromApiJob(job: any): any {
   return {
     title: text(first(job?.jobTitle, job?.title, job?.designation, "")),
     company: text(first(job?.companyName, job?.compName, job?.company?.name, "")),
-    rating: number(first(job?.companyRating, job?.rating, job?.company?.rating)),
-    reviews: number(first(job?.companyReviews, job?.reviews, job?.reviewCount, job?.company?.reviews)),
+    rating: number(first(job?.ambitionBoxData?.AggregateRating, job?.companyRating, job?.rating, job?.company?.rating)),
+    reviews: number(first(job?.ambitionBoxData?.ReviewsCount, job?.companyReviews, job?.reviews, job?.reviewCount, job?.company?.reviews)),
     postedDaysAgo: postedMatch ? Number(postedMatch[1]) : (/today|just now|few hours?/i.test(postedText) ? 0 : null),
     stipend: /unpaid/i.test(salaryText) ? 0 : (/(month|stipend)/i.test(salaryText) ? number(salaryText) : null),
     experience: text(first(job?.experienceText, job?.experience, job?.exp, placeholder("experience"), "")),
     location: text(first(job?.location, job?.jobLocation, job?.locationText, placeholder("location"), "")),
     href,
+    // Detail pages can be blocked or incomplete; preserve the API description
+    // as a reliable fallback for qualification.
+    apiDescription: text(first(job?.jobDescription, job?.description, job?.jobDesc, "")),
     fullText: JSON.stringify(job),
   };
 }
@@ -631,6 +636,16 @@ export async function runJobSearch(
       await page.waitForTimeout(1500);
 
       const details = await extractJobDetails(page);
+      if ((!details.description || details.description.length < 20) && targetJob.apiDescription) {
+        details.description = targetJob.apiDescription;
+        details.rawText = `${details.rawText}\n${targetJob.apiDescription}`;
+        log(`[Details Fallback] Using API description for "${targetJob.title}".`);
+      }
+      if (details.postedDaysAgo === null && targetJob.postedDaysAgo !== null) {
+        details.postedDaysAgo = targetJob.postedDaysAgo;
+        details.postedAgeText = `${targetJob.postedDaysAgo} days ago (API)`;
+      }
+      log(`[QUALIFY] "${targetJob.title}" -> rating=${targetJob.rating ?? "unknown"}, reviews=${targetJob.reviews ?? "unknown"}, ageDays=${details.postedDaysAgo ?? "unknown"}, descLen=${details.description?.length ?? 0}`);
       const evalResult = evaluateFullJobFilters(targetJob, details, options);
 
       if (evalResult.passed) {
