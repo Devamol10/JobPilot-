@@ -493,6 +493,9 @@ export async function runJobSearch(
   const page = await context.newPage();
   await page.setExtraHTTPHeaders({
     "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
+    "appid": "109",
+    "systemid": "109",
+    "clientid": "d353138c7dfa8018e655a6242131ef57",
   });
 
   // JSON responses are the primary listing source; React card rendering is
