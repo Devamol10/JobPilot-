@@ -179,6 +179,46 @@ function getNextPageUrl(urlStr: string, nextPage: number): string {
   }
 }
 
+import { chromium as extraChromium } from "playwright-extra";
+import stealthPlugin from "puppeteer-extra-plugin-stealth";
+
+extraChromium.use(stealthPlugin());
+
+async function solveWithFlareSolverr(targetUrl: string): Promise<{ cookies?: any[]; userAgent?: string; html?: string } | null> {
+  const flaresolverrUrl = process.env.FLARESOLVERR_URL || "http://localhost:8191/v1";
+  try {
+    const res = await fetch(flaresolverrUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cmd: "request.get",
+        url: targetUrl,
+        maxTimeout: 60000,
+      }),
+    });
+    if (!res.ok) return null;
+    const data = (await res.json()) as any;
+    if (data.status === "ok" && data.solution) {
+      return {
+        cookies: data.solution.cookies,
+        userAgent: data.solution.userAgent,
+        html: data.solution.response,
+      };
+    }
+  } catch (err) {
+    // FlareSolverr not running locally/unreachable, fallback to stealth
+  }
+  return null;
+}
+
+function constructDirectNaukriUrl(keyword: string, jobType: string): string {
+  const formattedKeyword = keyword.trim().toLowerCase().replace(/\s+/g, "-");
+  if (jobType === "internship") {
+    return `https://www.naukri.com/${formattedKeyword}-internship-jobs`;
+  }
+  return `https://www.naukri.com/${formattedKeyword}-jobs`;
+}
+
 export async function runJobSearch(
   options: SearchOptions,
   logCallback?: (msg: string) => void
@@ -219,11 +259,11 @@ export async function runJobSearch(
   }
 
   try {
-    context = await chromium.launchPersistentContext(profileDir, {
+    context = await extraChromium.launchPersistentContext(profileDir, {
       ...launchOptions,
     });
   } catch (err) {
-    context = await chromium.launchPersistentContext(profileDir, launchOptions);
+    context = await extraChromium.launchPersistentContext(profileDir, launchOptions);
   }
 
   await context.addInitScript(() => {
@@ -240,53 +280,63 @@ export async function runJobSearch(
   for (const keyword of options.keywords) {
     log(`\n=== KEYWORD: "${keyword.toUpperCase()}" ===`);
 
-    log(`Navigating to Naukri homepage...`);
-    await page.goto("https://www.naukri.com/", { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(2000);
+    const directUrl = constructDirectNaukriUrl(keyword, options.jobType);
+    log(`Attempting stealth direct navigation: ${directUrl}`);
 
-    const searchJobsBtn = page.getByRole("button", { name: "Search jobs here" })
-      .or(page.locator('.qsb-title, .suggestor-input'))
-      .first();
-
-    if (await searchJobsBtn.isVisible().catch(() => false)) {
-      await searchJobsBtn.click().catch(() => {});
-      await page.waitForTimeout(800);
+    // Try FlareSolverr first if available
+    const flareSolution = await solveWithFlareSolverr(directUrl);
+    if (flareSolution?.cookies && flareSolution.cookies.length > 0) {
+      log(`[FlareSolverr] Solved Cloudflare challenge! Injecting ${flareSolution.cookies.length} cookies.`);
+      const formattedCookies = flareSolution.cookies.map((c: any) => ({
+        name: c.name,
+        value: c.value,
+        domain: c.domain.startsWith(".") ? c.domain : `.${c.domain}`,
+        path: c.path || "/",
+      }));
+      await context.addCookies(formattedCookies).catch(() => {});
     }
 
-    if (options.jobType === "internship" || options.jobType === "fulltime") {
-      const jobTypeDropdown = page.locator("#jobType").locator("..");
-      if (await jobTypeDropdown.isVisible().catch(() => false)) {
-        await jobTypeDropdown.click().catch(() => {});
-        await page.waitForTimeout(500);
-        const targetOptionText = options.jobType === "internship" ? "Internship" : "Full Time";
-        await page.getByText(targetOptionText, { exact: true }).click().catch(() => {});
-        log(`Applied '${targetOptionText}' Job Type filter.`);
-      }
-    }
+    await page.goto(directUrl, { waitUntil: "domcontentloaded" });
+    await page.waitForTimeout(3000);
 
-    const keywordInput = page.getByPlaceholder("Enter keyword / designation / companies")
-      .or(page.locator('input[placeholder*="keyword"]'))
-      .or(page.locator('.suggestor-input input'))
-      .first();
+    // If still hit Access Denied, try homepage fallback navigation with human-like interactions
+    const initialTitle = await page.title();
+    if (initialTitle.toLowerCase().includes("access denied") || initialTitle.toLowerCase().includes("just a moment")) {
+      log(`[Warning] Direct navigation hit Cloudflare protection ("${initialTitle}"). Attempting fallback navigation via homepage...`);
+      await page.goto("https://www.naukri.com/", { waitUntil: "domcontentloaded" });
+      await page.waitForTimeout(2500);
 
-    if (await keywordInput.isVisible().catch(() => false)) {
-      await keywordInput.click().catch(() => {});
-      await page.waitForTimeout(300);
-
-      // Human character-by-character typing with random delay
-      for (const char of keyword) {
-        await keywordInput.press(char);
-        await page.waitForTimeout(40 + Math.floor(Math.random() * 60));
-      }
-      await page.waitForTimeout(600);
-
-      const searchBtn = page.getByRole("button", { name: "Search", exact: true })
-        .or(page.locator('button:has-text("Search"), .qsbSubmit'))
+      const searchJobsBtn = page.getByRole("button", { name: "Search jobs here" })
+        .or(page.locator('.qsb-title, .suggestor-input'))
         .first();
 
-      if (await searchBtn.isVisible().catch(() => false)) {
-        await searchBtn.click().catch(() => {});
-        await page.waitForTimeout(4000);
+      if (await searchJobsBtn.isVisible().catch(() => false)) {
+        await searchJobsBtn.click().catch(() => {});
+        await page.waitForTimeout(800);
+      }
+
+      const keywordInput = page.getByPlaceholder("Enter keyword / designation / companies")
+        .or(page.locator('input[placeholder*="keyword"]'))
+        .or(page.locator('.suggestor-input input'))
+        .first();
+
+      if (await keywordInput.isVisible().catch(() => false)) {
+        await keywordInput.click().catch(() => {});
+        await page.waitForTimeout(300);
+        for (const char of keyword) {
+          await keywordInput.press(char);
+          await page.waitForTimeout(40 + Math.floor(Math.random() * 60));
+        }
+        await page.waitForTimeout(600);
+
+        const searchBtn = page.getByRole("button", { name: "Search", exact: true })
+          .or(page.locator('button:has-text("Search"), .qsbSubmit'))
+          .first();
+
+        if (await searchBtn.isVisible().catch(() => false)) {
+          await searchBtn.click().catch(() => {});
+          await page.waitForTimeout(4000);
+        }
       }
     }
 

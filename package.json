@@ -9,6 +9,8 @@
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "playwright": "^1.63.0",
+    "playwright-extra": "^4.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2",
     "tsx": "^4.23.13"
   },
   "scripts": {
