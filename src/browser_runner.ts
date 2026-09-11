@@ -275,13 +275,26 @@ export async function runJobSearch(
     "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
   });
 
-  // Diagnostics Network Response Listener for WAF / IP block detection
-  page.on("response", (response) => {
+  // Diagnostics Network Response Listener with API body jobCount inspector
+  page.on("response", async (response) => {
     const url = response.url();
     if (url.includes("/jobapi/") || url.includes("naukri.com/search") || url.includes("cloud-block") || url.includes("challenge")) {
       log(`[NETWORK LOG] ${response.status()} — ${url}`);
     }
+    if (url.includes("/jobapi/v3/search") || url.includes("/jobapi/")) {
+      try {
+        const body = (await response.json()) as any;
+        const pageNo = new URL(url).searchParams.get("pageNo") || "1";
+        const count = body?.jobDetails?.length ?? body?.noOfJobs ?? "N/A";
+        log(`[API BODY LOG] pageNo=${pageNo} → jobCount=${count}`);
+      } catch (e) {
+        // ignore non-json responses
+      }
+    }
   });
+
+  const humanDelay = (minMs = 3000, maxMs = 7000) =>
+    new Promise((res) => setTimeout(res, minMs + Math.random() * (maxMs - minMs)));
 
   const allJobs: CombinedJob[] = [];
 
@@ -451,8 +464,15 @@ export async function runJobSearch(
         const nextPageNum = pageNumber + 1;
         let clicked = false;
         try {
+          await page.evaluate(() => window.scrollBy({ top: 400 + Math.random() * 300, behavior: "smooth" }));
+          await page.waitForTimeout(500);
           await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
           await page.waitForTimeout(800);
+
+          const nextHref = await page.locator('a.styles_btn-secondary__2AsIP, a[class*="pagination"]:has-text("Next"), a:has-text("Next")')
+            .first()
+            .getAttribute("href")
+            .catch(() => null);
 
           const pageBtn = page.getByRole("link", { name: String(nextPageNum), exact: true })
             .or(page.locator(`a:has-text("${nextPageNum}")`))
@@ -460,7 +480,17 @@ export async function runJobSearch(
             .first();
 
           if (await pageBtn.isVisible().catch(() => false)) {
+            log(`[Pagination] Randomized human delay before clicking page ${nextPageNum}...`);
+            await humanDelay(3500, 6500);
             await pageBtn.click().catch(() => {});
+            await page.waitForTimeout(3000);
+            clicked = true;
+            pageNumber++;
+          } else if (nextHref) {
+            log(`[Pagination] Found DOM next href link (${nextHref}). Navigating with human delay...`);
+            await humanDelay(3500, 6500);
+            const absoluteNextUrl = nextHref.startsWith("http") ? nextHref : new URL(nextHref, page.url()).toString();
+            await page.goto(absoluteNextUrl, { waitUntil: "domcontentloaded" });
             await page.waitForTimeout(3000);
             clicked = true;
             pageNumber++;
@@ -471,6 +501,8 @@ export async function runJobSearch(
           const currentUrl = page.url();
           const nextUrl = getNextPageUrl(currentUrl, pageNumber + 1);
           if (nextUrl !== currentUrl) {
+            log(`[Pagination] Fallback URL navigation to page ${pageNumber + 1}...`);
+            await humanDelay(3500, 6500);
             pageNumber++;
             await page.goto(nextUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
             await page.waitForTimeout(2500);
