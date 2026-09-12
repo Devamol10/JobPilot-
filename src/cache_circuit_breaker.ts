@@ -58,26 +58,34 @@ export class CircuitBreaker {
   }
 
   public async recordSuccess(): Promise<void> {
-    await this.syncFromStore();
-    console.log(`[CircuitBreaker] Live scrape SUCCESS. Resetting failure counter (was ${this.consecutiveFailures}). State -> CLOSED.`);
+    await cacheStore.resetFailureCounter();
+    console.log(`[CircuitBreaker] Live scrape SUCCESS. Resetting failure counter. State -> CLOSED.`);
     this.consecutiveFailures = 0;
     this.currentState = "CLOSED";
     this.lastTrippedTimestamp = null;
     await this.persistState();
   }
 
-  public async recordFailure(errorMsg?: string): Promise<void> {
-    await this.syncFromStore();
-    this.consecutiveFailures++;
-    console.log(`[CircuitBreaker] Live scrape FAILURE recorded (${this.consecutiveFailures}/${this.FAILURE_THRESHOLD}). Error: ${errorMsg || "Unknown"}`);
+  public async recordFailure(errorMsg?: string): Promise<number> {
+    // Atomic Redis INCR counter increment
+    const newCount = await cacheStore.incrFailureCounter();
+    this.consecutiveFailures = newCount;
 
-    if (this.consecutiveFailures >= this.FAILURE_THRESHOLD || this.currentState === "HALF_OPEN") {
+    console.log(`[CircuitBreaker] Live scrape FAILURE recorded (${newCount}/${this.FAILURE_THRESHOLD}). Error: ${errorMsg || "Unknown"}`);
+
+    // Immediate threshold check on atomic INCR return value
+    if (newCount >= this.FAILURE_THRESHOLD || this.currentState === "HALF_OPEN") {
       this.currentState = "OPEN";
       this.lastTrippedTimestamp = Date.now();
-      console.log(`[CircuitBreaker TRIPPED] State -> OPEN. Pausing live scrapes for 25 minutes to protect server IP.`);
+      console.log(`[CircuitBreaker TRIPPED] State -> OPEN (Failure count: ${newCount}). Pausing live scrapes for 25 minutes to protect server IP.`);
     }
 
     await this.persistState();
+    return newCount;
+  }
+
+  public async recordBlockError(errorMsg?: string): Promise<number> {
+    return this.recordFailure(errorMsg);
   }
 
   public async getStatus() {

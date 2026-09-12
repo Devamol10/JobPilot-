@@ -209,6 +209,45 @@ class CacheStore {
     return this.memoryBreakerState;
   }
 
+  public async incrFailureCounter(): Promise<number> {
+    if (this.redisClient) {
+      try {
+        const redisKey = "jobpilot:failure_counter";
+        if ("incr" in this.redisClient) {
+          const newCount = await (this.redisClient as any).incr(redisKey);
+          const countNum = Number(newCount);
+          this.memoryBreakerState.consecutiveFailures = countNum;
+          this.saveToFile();
+          return countNum;
+        }
+      } catch (err) {
+        console.error("[CacheStore] Redis INCR error:", err);
+      }
+    }
+
+    this.memoryBreakerState.consecutiveFailures++;
+    this.saveToFile();
+    return this.memoryBreakerState.consecutiveFailures;
+  }
+
+  public async resetFailureCounter(): Promise<void> {
+    this.memoryBreakerState.consecutiveFailures = 0;
+    this.saveToFile();
+
+    if (this.redisClient) {
+      try {
+        const redisKey = "jobpilot:failure_counter";
+        if ("del" in this.redisClient) {
+          await (this.redisClient as any).del(redisKey);
+        } else if ("set" in this.redisClient) {
+          await (this.redisClient as any).set(redisKey, 0);
+        }
+      } catch (err) {
+        console.error("[CacheStore] Redis resetFailureCounter error:", err);
+      }
+    }
+  }
+
   public getEntriesCount(): number {
     return this.memoryCache.size;
   }
