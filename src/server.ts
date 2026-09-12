@@ -117,68 +117,48 @@ app.post("/api/search", async (req, res) => {
     });
   }
 
-  // Live Scrape Execution
+  // Live Scrape Execution (async fire-and-forget so frontend can poll for live progress)
   isRunning = true;
   currentLogs = [];
   lastResult = null;
 
-  try {
-    const result = await runJobSearch(options, (logMsg) => {
-      currentLogs.push(logMsg);
-    });
-
-    await circuitBreaker.recordSuccess();
-    await cacheStore.setCache(cacheKey, options, result);
-
-    lastResult = result;
-    isRunning = false;
-
-    return res.json({
-      status: "completed",
-      isCached: false,
-      circuitBreakerState: "CLOSED",
-      options,
-      result,
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const isStructural = err instanceof StructuralBlockError || message.includes("blocked at IP level") || message.includes("STRUCTURAL BLOCK");
-
-    if (isStructural) {
-      await circuitBreaker.recordFailure(message);
-    }
-
-    currentLogs.push(`[ERROR] Live search failed: ${message}`);
-    isRunning = false;
-
-    // Check if cached result exists to serve as fallback despite error
-    const { entry, isStaleCapExceeded, cacheAgeMinutes } = await cacheStore.getCache(cacheKey);
-
-    if (entry && !isStaleCapExceeded) {
-      currentLogs.push(`[Cache Fallback] Serving cached search results (${cacheAgeMinutes} mins old) after live scrape block.`);
-      lastResult = entry.result;
-      const breakerState = await circuitBreaker.getStatus();
-      return res.json({
-        status: "completed",
-        isCached: true,
-        cacheAgeMinutes,
-        circuitBreakerState: breakerState.currentState,
-        options,
-        result: entry.result,
+  // Fire the scrape in background — do NOT await here
+  (async () => {
+    try {
+      const result = await runJobSearch(options, (logMsg) => {
+        currentLogs.push(logMsg);
       });
-    }
 
-    const breakerState = await circuitBreaker.getStatus();
-    return res.status(200).json({
-      status: "blocked",
-      isCached: false,
-      noFreshDataAvailable: true,
-      circuitBreakerState: breakerState.currentState,
-      error: message,
-      message: "Naukri temporarily unreachable, no recent results available — try again later.",
-      logs: currentLogs,
-    });
-  }
+      await circuitBreaker.recordSuccess();
+      await cacheStore.setCache(cacheKey, options, result);
+
+      lastResult = result;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const isStructural = err instanceof StructuralBlockError || message.includes("blocked at IP level") || message.includes("STRUCTURAL BLOCK");
+
+      if (isStructural) {
+        await circuitBreaker.recordFailure(message);
+      }
+
+      currentLogs.push(`[ERROR] Live search failed: ${message}`);
+
+      // Check if cached result exists to serve as fallback despite error
+      const { entry: fallbackEntry, isStaleCapExceeded: fallbackStale } = await cacheStore.getCache(cacheKey);
+
+      if (fallbackEntry && !fallbackStale) {
+        currentLogs.push(`[Cache Fallback] Serving cached search results after live scrape block.`);
+        lastResult = fallbackEntry.result;
+      }
+    } finally {
+      isRunning = false;
+    }
+  })();
+
+  return res.json({
+    status: "started",
+    message: "Search started. Poll GET /api/search for live progress.",
+  });
 });
 
 // --- Circuit Breaker Test Endpoints (Gated for non-production environments) ---

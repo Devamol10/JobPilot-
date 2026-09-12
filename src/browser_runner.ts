@@ -104,8 +104,22 @@ export interface SearchDiagnostics {
   qualifiedCount: number;
 }
 
+export interface RejectedJob {
+  title: string;
+  company: string;
+  href: string;
+  rating: number | null;
+  reviews: number | null;
+  stipend: number | null;
+  location: string;
+  postedDaysAgo: number | null;
+  postedAgeText: string | null;
+  reasons: string[];
+}
+
 export interface SearchRunResult {
   jobs: FinalRankedJob[];
+  rejectedJobs: RejectedJob[];
   diagnostics: SearchDiagnostics[];
   logs: string[];
 }
@@ -566,6 +580,7 @@ export async function runJobSearch(
     new Promise((res) => setTimeout(res, minMs + Math.random() * (maxMs - minMs)));
 
   const allJobs: CombinedJob[] = [];
+  const allRejectedJobs: RejectedJob[] = [];
 
   for (const keyword of options.keywords) {
     apiListingsByPage.clear();
@@ -846,9 +861,18 @@ export async function runJobSearch(
         for (const r of evalResult.rejectionReasons) {
           rejectionCounts[r] = (rejectionCounts[r] || 0) + 1;
         }
-
-        // Reject only this candidate. API and fallback sources do not promise a
-        // globally date-sorted merged list, so later jobs may still be fresh.
+        allRejectedJobs.push({
+          title: targetJob.title,
+          company: targetJob.company,
+          href: targetJob.href,
+          rating: targetJob.rating,
+          reviews: targetJob.reviews,
+          stipend: targetJob.stipend,
+          location: targetJob.location,
+          postedDaysAgo: details.postedDaysAgo ?? targetJob.postedDaysAgo ?? null,
+          postedAgeText: details.postedAgeText ?? targetJob.postedAgeText ?? null,
+          reasons: evalResult.rejectionReasons,
+        });
       }
     }
 
@@ -887,6 +911,7 @@ export async function runJobSearch(
 
   return {
     jobs: finalRanked,
+    rejectedJobs: allRejectedJobs,
     diagnostics,
     logs,
   };
