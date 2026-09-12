@@ -463,18 +463,30 @@ export async function runJobSearch(
 
   let browser;
   let context;
-  const proxyConfig = process.env.PROXY_URL ? { server: process.env.PROXY_URL } : undefined;
-  if (proxyConfig) {
-    log(`[Proxy] Using configured proxy: ${process.env.PROXY_URL}`);
-  }
+  
   try {
-    browser = await chromium.launch({ headless: options.headless, proxy: proxyConfig });
-    context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-      viewport: { width: 1280, height: 800 },
-    });
-  } catch (err) {
-    browser = await chromium.launch({ headless: true, proxy: proxyConfig });
+    if (process.env.BRIGHTDATA_WS_URL) {
+      log(`[Proxy] Connecting to BrightData Scraping Browser over CDP...`);
+      browser = await chromium.connectOverCDP(process.env.BRIGHTDATA_WS_URL);
+      // BrightData Scraping Browser provides a default context
+      context = browser.contexts()[0]; 
+      if (!context) {
+        context = await browser.newContext();
+      }
+    } else {
+      const proxyConfig = process.env.PROXY_URL ? { server: process.env.PROXY_URL } : undefined;
+      if (proxyConfig) {
+        log(`[Proxy] Using configured standard proxy: ${process.env.PROXY_URL}`);
+      }
+      browser = await chromium.launch({ headless: options.headless, proxy: proxyConfig });
+      context = await browser.newContext({
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        viewport: { width: 1280, height: 800 },
+      });
+    }
+  } catch (err: any) {
+    log(`[Error] Browser initialization failed: ${err.message}. Falling back to default headless launch.`);
+    browser = await chromium.launch({ headless: true });
     context = await browser.newContext();
   }
 
