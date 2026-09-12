@@ -790,6 +790,19 @@ export async function runJobSearch(
 
       if (reasons.length > 0) {
         for (const r of reasons) rejectionCounts[r] = (rejectionCounts[r] || 0) + 1;
+        
+        allRejectedJobs.push({
+          title: job.title,
+          company: job.company,
+          href: job.href,
+          rating: job.rating,
+          reviews: job.reviews,
+          stipend: job.stipend,
+          location: job.location,
+          postedDaysAgo: job.postedDaysAgo ?? null,
+          postedAgeText: job.postedAgeText ?? null,
+          reasons: reasons,
+        });
       }
 
       return { job, passed: reasons.length === 0 };
@@ -901,6 +914,21 @@ export async function runJobSearch(
   const uniqueJobs = Array.from(jobMap.values());
   const finalRanked = rankJobs(uniqueJobs, 20);
 
+  // Deduplicate rejected jobs and ensure they aren't in the final qualified list
+  const rejectedJobMap = new Map<string, RejectedJob>();
+  for (const rJob of allRejectedJobs) {
+    if (jobMap.has(rJob.href)) continue; // Skip if it ultimately qualified (e.g., via another keyword)
+    if (rejectedJobMap.has(rJob.href)) {
+      const existing = rejectedJobMap.get(rJob.href)!;
+      for (const r of rJob.reasons) {
+        if (!existing.reasons.includes(r)) existing.reasons.push(r);
+      }
+    } else {
+      rejectedJobMap.set(rJob.href, { ...rJob });
+    }
+  }
+  const uniqueRejectedJobs = Array.from(rejectedJobMap.values());
+
   log(`\n[Search Completed] Total Qualified & Ranked Jobs: ${finalRanked.length}`);
 
   // Browser shutdown is cleanup, not part of producing the result. A cleanup
@@ -911,7 +939,7 @@ export async function runJobSearch(
 
   return {
     jobs: finalRanked,
-    rejectedJobs: allRejectedJobs,
+    rejectedJobs: uniqueRejectedJobs,
     diagnostics,
     logs,
   };
