@@ -179,12 +179,34 @@ class CacheStore {
 
     if (this.redisClient) {
       try {
-        const redisKey = "jobpilot:circuit_breaker";
-        if ("set" in this.redisClient) {
-          await (this.redisClient as any).set(redisKey, JSON.stringify(state));
+        const breakerKey = "jobpilot:circuit_breaker";
+        const counterKey = "jobpilot:failure_counter";
+
+        if ("pipeline" in this.redisClient) {
+          // Upstash Redis Pipeline API
+          const p = (this.redisClient as any).pipeline();
+          p.set(breakerKey, JSON.stringify(state));
+          if (state.consecutiveFailures === 0 || state.currentState === "CLOSED") {
+            p.del(counterKey);
+          } else {
+            p.set(counterKey, state.consecutiveFailures);
+          }
+          await p.exec();
+        } else if ("multi" in this.redisClient) {
+          // ioredis Multi/Transaction API
+          const multi = (this.redisClient as any).multi();
+          multi.set(breakerKey, JSON.stringify(state));
+          if (state.consecutiveFailures === 0 || state.currentState === "CLOSED") {
+            multi.del(counterKey);
+          } else {
+            multi.set(counterKey, state.consecutiveFailures);
+          }
+          await multi.exec();
+        } else if ("set" in this.redisClient) {
+          await (this.redisClient as any).set(breakerKey, JSON.stringify(state));
         }
       } catch (err) {
-        console.error("[CacheStore] Redis saveBreakerState error:", err);
+        console.error("[CacheStore] Redis saveBreakerState pipeline error:", err);
       }
     }
   }
@@ -193,13 +215,21 @@ class CacheStore {
     this.loadFromFile();
     if (this.redisClient) {
       try {
-        const redisKey = "jobpilot:circuit_breaker";
-        let rawData: any = null;
+        const breakerKey = "jobpilot:circuit_breaker";
+        const counterKey = "jobpilot:failure_counter";
+
+        let rawState: any = null;
+        let rawCounter: any = null;
+
         if ("get" in this.redisClient) {
-          rawData = await (this.redisClient as any).get(redisKey);
+          rawState = await (this.redisClient as any).get(breakerKey);
+          rawCounter = await (this.redisClient as any).get(counterKey);
         }
-        if (rawData) {
-          const parsed = typeof rawData === "string" ? JSON.parse(rawData) : rawData;
+
+        if (rawState) {
+          const parsed = typeof rawState === "string" ? JSON.parse(rawState) : rawState;
+          const counterVal = rawCounter !== null && rawCounter !== undefined ? Number(rawCounter) : 0;
+          parsed.consecutiveFailures = counterVal;
           this.memoryBreakerState = parsed;
         }
       } catch (err) {
@@ -236,11 +266,25 @@ class CacheStore {
 
     if (this.redisClient) {
       try {
-        const redisKey = "jobpilot:failure_counter";
-        if ("del" in this.redisClient) {
-          await (this.redisClient as any).del(redisKey);
-        } else if ("set" in this.redisClient) {
-          await (this.redisClient as any).set(redisKey, 0);
+        const breakerKey = "jobpilot:circuit_breaker";
+        const counterKey = "jobpilot:failure_counter";
+
+        const updatedState = { ...this.memoryBreakerState, consecutiveFailures: 0, currentState: "CLOSED" as const, lastTrippedTimestamp: null };
+        this.memoryBreakerState = updatedState;
+
+        if ("pipeline" in this.redisClient) {
+          const p = (this.redisClient as any).pipeline();
+          p.set(breakerKey, JSON.stringify(updatedState));
+          p.del(counterKey);
+          await p.exec();
+        } else if ("multi" in this.redisClient) {
+          const multi = (this.redisClient as any).multi();
+          multi.set(breakerKey, JSON.stringify(updatedState));
+          multi.del(counterKey);
+          await multi.exec();
+        } else if ("del" in this.redisClient) {
+          await (this.redisClient as any).del(counterKey);
+          await (this.redisClient as any).set(breakerKey, JSON.stringify(updatedState));
         }
       } catch (err) {
         console.error("[CacheStore] Redis resetFailureCounter error:", err);
