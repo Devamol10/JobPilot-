@@ -210,9 +210,33 @@ app.post("/api/test/reset-breaker", testRouteMiddleware, async (req, res) => {
 // Start Canary Health Background Monitor
 canaryMonitor.start(12);
 
-app.listen(Number(PORT), "0.0.0.0", () => {
+const server = app.listen(Number(PORT), "0.0.0.0", () => {
   console.log("\n==================================================");
   console.log(`🚀 JobPilot Web UI is live on port: ${PORT}`);
   console.log(`📡 Redis Configured: ${cacheStore.isRedisConfigured()}`);
   console.log("==================================================\n");
 });
+
+// Graceful shutdown handling for Render deployments
+const gracefulShutdown = (signal: string) => {
+  console.log(`\n[Server] Received ${signal}, starting graceful shutdown...`);
+  
+  // Stop background monitors
+  canaryMonitor.stop();
+  console.log("[Server] Canary monitor stopped.");
+
+  // Close HTTP server
+  server.close(() => {
+    console.log("[Server] HTTP server closed.");
+    process.exit(0);
+  });
+
+  // Force shutdown if it takes too long (e.g., 10 seconds)
+  setTimeout(() => {
+    console.error("[Server] Forcefully shutting down after 10s timeout.");
+    process.exit(1);
+  }, 10000);
+};
+
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));

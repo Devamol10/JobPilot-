@@ -128,10 +128,10 @@ class CanaryHealthMonitor {
     if (this.timer) clearInterval(this.timer);
     console.log(`[Canary Health] Starting background monitor (interval: ${intervalMinutes} mins)...`);
     
-    // Run initial check after 10s warmup delay
+    // Run initial check after 60s warmup delay (gives Render health-check time to pass)
     setTimeout(() => {
       this.runCheck().catch(() => {});
-    }, 10000);
+    }, 60000);
 
     this.timer = setInterval(() => {
       this.runCheck().catch(() => {});
@@ -147,7 +147,7 @@ class CanaryHealthMonitor {
       status: this.status,
       lastCheckTime: this.lastCheckTime,
       lastCheckAgeMinutes: this.lastCheckMs ? Math.floor((Date.now() - this.lastCheckMs) / 60000) : null,
-      webhookConfigured: Boolean(process.env.WEBHOOK_URL),
+      webhookConfigured: Boolean(process.env.WEBHOOK_URL || (process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID)),
     };
   }
 }
