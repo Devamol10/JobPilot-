@@ -735,54 +735,18 @@ export async function runJobSearch(
       allJobListings.push(...pageListings);
 
       if (pageNumber < options.maxPages) {
-        const nextPageNum = pageNumber + 1;
-        let clicked = false;
-        try {
-          await page.evaluate(() => window.scrollBy({ top: 400 + Math.random() * 300, behavior: "smooth" }));
-          await page.waitForTimeout(500);
-          await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-          await page.waitForTimeout(800);
-
-          const nextHref = await page.locator('a.styles_btn-secondary__2AsIP, a[class*="pagination"]:has-text("Next"), a:has-text("Next")')
-            .first()
-            .getAttribute("href")
-            .catch(() => null);
-
-          const pageBtn = page.getByRole("link", { name: String(nextPageNum), exact: true })
-            .or(page.locator(`a:has-text("${nextPageNum}")`))
-            .or(page.locator('a[class*="btn-secondary"]:has-text("Next"), a:has-text("Next"), button:has-text("Next")'))
-            .first();
-
-          if (await pageBtn.isVisible().catch(() => false)) {
-            log(`[Pagination] Randomized human delay before clicking page ${nextPageNum}...`);
-            await humanDelay(3500, 6500);
-            await pageBtn.click().catch(() => {});
-            await page.waitForTimeout(3000);
-            clicked = true;
-            pageNumber++;
-          } else if (nextHref) {
-            log(`[Pagination] Found DOM next href link (${nextHref}). Navigating with human delay...`);
-            await humanDelay(3500, 6500);
-            const absoluteNextUrl = nextHref.startsWith("http") ? nextHref : new URL(nextHref, page.url()).toString();
-            await page.goto(absoluteNextUrl, { waitUntil: "domcontentloaded" });
-            await page.waitForTimeout(3000);
-            clicked = true;
-            pageNumber++;
-          }
-        } catch (err) {}
-
-        if (!clicked) {
-          const currentUrl = page.url();
-          const nextUrl = getNextPageUrl(currentUrl, pageNumber + 1);
-          if (nextUrl !== currentUrl) {
-            log(`[Pagination] Fallback URL navigation to page ${pageNumber + 1}...`);
-            await humanDelay(3500, 6500);
-            pageNumber++;
-            await page.goto(nextUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
-            await page.waitForTimeout(2500);
-          } else {
-            break;
-          }
+        const currentUrl = page.url();
+        const nextUrl = getNextPageUrl(currentUrl, pageNumber + 1);
+        
+        if (nextUrl !== currentUrl) {
+          log(`[Pagination] URL sequential navigation to page ${pageNumber + 1}...`);
+          await humanDelay(3500, 6500);
+          pageNumber++;
+          await page.goto(nextUrl, { waitUntil: "domcontentloaded" }).catch(() => {});
+          await page.waitForTimeout(2500);
+        } else {
+          log(`[Pagination] Cannot determine next URL from ${currentUrl}, stopping pagination.`);
+          break;
         }
       } else {
         break;
