@@ -24,6 +24,27 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // Poll Infrastructure Status (/api/status) for Canary & Circuit Breaker Health
+  async function updateInfraStatus() {
+    try {
+      const res = await fetch('/api/status');
+      const data = await res.json();
+      if (data.circuitBreaker && data.canaryHealth) {
+        const breakerState = data.circuitBreaker.currentState;
+        const canary = data.canaryHealth.status;
+        if (breakerState === 'OPEN') {
+          globalStatus.innerHTML = `<span class="dot error"></span> Circuit Breaker OPEN (Cooldown ${data.circuitBreaker.cooldownRemainingSeconds}s)`;
+        } else if (canary === 'BLOCKED') {
+          globalStatus.innerHTML = `<span class="dot error"></span> IP Blocked (Canary Alert)`;
+        } else if (!data.isRunning) {
+          globalStatus.innerHTML = `<span class="dot idle"></span> Ready (Breaker: ${breakerState})`;
+        }
+      }
+    } catch (err) {}
+  }
+  setInterval(updateInfraStatus, 5000);
+  updateInfraStatus();
+
   // Handle Form Submission
   searchForm.addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -66,23 +87,32 @@ document.addEventListener('DOMContentLoaded', () => {
       });
 
       const data = await res.json();
+
+      if (data.noFreshDataAvailable) {
+        renderStalenessWarningUI(data.message || "Naukri temporarily unreachable, no recent results available — try again later.");
+        renderLogs(data.logs || []);
+        setRunningState(false);
+        return;
+      }
+
       if (!res.ok) {
         throw new Error(data.error || 'Failed to start search');
       }
 
-      // Production may restart or route polling requests to another instance.
-      // The completed search response is therefore the authoritative result.
       if (data.result && Array.isArray(data.result.jobs)) {
         renderLogs(data.result.logs || []);
-        renderResults(data.result.jobs);
+        renderResults(data.result.jobs, data.result.logs || [], data.isCached, data.cacheAgeMinutes);
         setRunningState(false);
-        appendLog(`[System] Search completed: ${data.result.jobs.length} qualified job(s) ready.`, 'success');
+        const sourceLabel = data.isCached ? `cached (${data.cacheAgeMinutes} mins old)` : 'live';
+        appendLog(`[System] Search completed: ${data.result.jobs.length} qualified job(s) ready [${sourceLabel}].`, 'success');
       } else {
-        // Backward-compatible fallback for an older asynchronous backend.
         startStatusPolling();
       }
     } catch (err) {
       appendLog(`[Error] ${err.message}`, 'error');
+      if (err.message.includes('blocked at IP level') || err.message.includes('STRUCTURAL BLOCK')) {
+        renderStructuralBlockUI(err.message);
+      }
       setRunningState(false);
     }
   });
@@ -92,24 +122,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     pollInterval = setInterval(async () => {
       try {
-        const res = await fetch('/api/status');
+        const res = await fetch('/api/search');
         const data = await res.json();
 
-        // Update Logs Terminal
         if (Array.isArray(data.logs)) {
           renderLogs(data.logs);
         }
 
-        // Check if finished
         if (!data.isRunning) {
           clearInterval(pollInterval);
           setRunningState(false);
           if (data.result && data.result.jobs) {
-            renderResults(data.result.jobs);
+            renderResults(data.result.jobs, data.logs || [], data.isCached, data.cacheAgeMinutes);
           }
         }
       } catch (err) {
-        console.error('Status polling error:', err);
+        console.error('Search status polling error:', err);
       }
     }, 1500);
   }
@@ -135,7 +163,7 @@ document.addEventListener('DOMContentLoaded', () => {
       line.className = 'log-line';
 
       if (log.includes('✓ QUALIFIED')) line.classList.add('success');
-      else if (log.includes('✗ Rejected') || log.includes('[ERROR]')) line.classList.add('error');
+      else if (log.includes('✗ Rejected') || log.includes('[ERROR]') || log.includes('STRUCTURAL BLOCK') || log.includes('CircuitBreaker')) line.classList.add('error');
       else if (log.includes('=== KEYWORD')) line.classList.add('highlight');
 
       line.innerText = log;
@@ -145,22 +173,39 @@ document.addEventListener('DOMContentLoaded', () => {
     terminalOutput.scrollTop = terminalOutput.scrollHeight;
   }
 
-  function renderResults(jobs) {
+  function renderResults(jobs, logs = [], isCached = false, cacheAgeMinutes = null) {
     jobsCountEl.innerText = jobs.length;
+
+    const isIpBlocked = logs.some((l) => l.includes('STRUCTURAL BLOCK') || l.includes('blocked at IP level'));
 
     if (!jobs || jobs.length === 0) {
       noResultsState.classList.remove('hidden');
       jobsTableWrapper.classList.add('hidden');
-      noResultsState.innerHTML = `
-        <div class="empty-icon">⚠️</div>
-        <p>No jobs matched all your selected hard filters. Try lowering company rating, review, or stipend thresholds in the dropdowns above!</p>
-      `;
+      if (isIpBlocked) {
+        renderStructuralBlockUI("naukri.com blocked at IP level — run client-side or use proxy");
+      } else {
+        noResultsState.innerHTML = `
+          <div class="empty-icon">⚠️</div>
+          <p>No jobs matched all your selected hard filters. Try lowering company rating, review, or stipend thresholds in the dropdowns above!</p>
+        `;
+      }
       return;
     }
 
     noResultsState.classList.add('hidden');
     jobsTableWrapper.classList.remove('hidden');
     jobsTableBody.innerHTML = '';
+
+    // Cache Banner Notice
+    if (isCached) {
+      const cacheRow = document.createElement('tr');
+      cacheRow.innerHTML = `
+        <td colspan="8" style="background: rgba(59, 130, 246, 0.12); border: 1px solid rgba(59, 130, 246, 0.3); padding: 10px 16px; color: #93c5fd; font-size: 13px; font-weight: 500; border-radius: 6px;">
+          📦 <strong>Showing cached results from ${cacheAgeMinutes ?? 'few'} min(s) ago</strong> (Circuit Breaker active / IP protection enabled).
+        </td>
+      `;
+      jobsTableBody.appendChild(cacheRow);
+    }
 
     jobs.forEach((job, index) => {
       const tr = document.createElement('tr');
@@ -200,6 +245,36 @@ document.addEventListener('DOMContentLoaded', () => {
     terminalOutput.scrollTop = terminalOutput.scrollHeight;
   }
 
+  function renderStructuralBlockUI(message) {
+    noResultsState.classList.remove('hidden');
+    jobsTableWrapper.classList.add('hidden');
+    noResultsState.innerHTML = `
+      <div class="empty-icon">🚫</div>
+      <h3 style="color: #ef4444; margin: 8px 0 4px;">STRUCTURAL IP BLOCK DETECTED</h3>
+      <p style="color: #f87171; font-size: 14px; max-width: 540px; margin: 0 auto 12px; line-height: 1.5;">
+        Naukri.com is blocking automated browser requests at the IP level (Cloudflare anti-bot active). Transient retries will not recover from this IP block.
+      </p>
+      <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.3); padding: 10px 16px; borderRadius: 8px; font-size: 13px; color: #fca5a5; display: inline-block;">
+        💡 <strong>Recommendation:</strong> Run JobPilot locally from your desktop browser environment or configure a residential proxy.
+      </div>
+    `;
+  }
+
+  function renderStalenessWarningUI(message) {
+    noResultsState.classList.remove('hidden');
+    jobsTableWrapper.classList.add('hidden');
+    noResultsState.innerHTML = `
+      <div class="empty-icon">⏳</div>
+      <h3 style="color: #f59e0b; margin: 8px 0 4px;">TEMPORARILY UNAVAILABLE</h3>
+      <p style="color: #fbbf24; font-size: 14px; max-width: 540px; margin: 0 auto 12px; line-height: 1.5;">
+        ${escapeHtml(message)}
+      </p>
+      <div style="background: rgba(245, 158, 11, 0.1); border: 1px solid rgba(245, 158, 11, 0.3); padding: 10px 16px; borderRadius: 8px; font-size: 13px; color: #fde68a; display: inline-block;">
+        💡 <strong>Note:</strong> Cached data older than 3 hours is hidden to ensure freshness. Please try again after the cooldown period.
+      </div>
+    `;
+  }
+
   function escapeHtml(str) {
     if (!str) return '';
     return str.replace(/[&<>"']/g, (m) => ({
@@ -211,3 +286,4 @@ document.addEventListener('DOMContentLoaded', () => {
     }[m]));
   }
 });
+

@@ -1,7 +1,10 @@
 import express from "express";
 import cors from "cors";
 import path from "path";
-import { runJobSearch, SearchOptions, SearchRunResult } from "./browser_runner";
+import { runJobSearch, SearchOptions, SearchRunResult, StructuralBlockError } from "./browser_runner";
+import { cacheStore, MAX_CACHE_AGE_MINUTES } from "./cache_store";
+import { circuitBreaker } from "./cache_circuit_breaker";
+import { canaryMonitor } from "./canary_health";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,7 +17,7 @@ let isRunning = false;
 let currentLogs: string[] = [];
 let lastResult: SearchRunResult | null = null;
 
-// Health Check Endpoint
+// Health Check Endpoint (Basic service check)
 app.get(["/api/health", "/health"], (req, res) => {
   res.status(200).json({
     status: "ok",
@@ -25,14 +28,33 @@ app.get(["/api/health", "/health"], (req, res) => {
   });
 });
 
-app.get("/api/status", (req, res) => {
+// Infrastructure Status Endpoint (Infrastructure & Server Health ONLY)
+app.get("/api/status", async (req, res) => {
+  const breakerStatus = await circuitBreaker.getStatus();
+  const canaryStatus = canaryMonitor.getStatusInfo();
+  const isRedisConfigured = cacheStore.isRedisConfigured();
+
+  res.json({
+    isRunning,
+    uptime: Math.floor(process.uptime()),
+    circuitBreaker: breakerStatus,
+    canaryHealth: canaryStatus,
+    redisConfigured: isRedisConfigured,
+    cacheEntriesCount: cacheStore.getEntriesCount(),
+  });
+});
+
+// Search Endpoint GET Handler (Search Progress & Results ONLY)
+app.get("/api/search", (req, res) => {
   res.json({
     isRunning,
     logs: currentLogs,
     result: lastResult,
+    message: "GET returns last search progress and results. POST /api/search to trigger a search run.",
   });
 });
 
+// Search Endpoint POST Handler (Trigger Search Run with Circuit Breaker & Redis Cache Fallback)
 app.post("/api/search", async (req, res) => {
   if (isRunning) {
     return res.status(400).json({ error: "Search is already running in background!" });
@@ -60,30 +82,137 @@ app.post("/api/search", async (req, res) => {
     headless: Boolean(headless),
   };
 
+  const cacheKey = cacheStore.generateCacheKey(options);
+  const canLiveScrape = await circuitBreaker.canAttemptLiveScrape();
+
+  // If Circuit Breaker is OPEN, bypass live scrape and serve cached results (or staleness warning)
+  if (!canLiveScrape) {
+    const breakerState = await circuitBreaker.getStatus();
+    currentLogs = [`[CircuitBreaker] Circuit Breaker is ${breakerState.currentState} (Cooldown active: ${breakerState.cooldownRemainingSeconds}s remaining). Bypassing live scrape.`];
+    
+    const { entry, isStaleCapExceeded, cacheAgeMinutes } = await cacheStore.getCache(cacheKey);
+
+    if (entry && !isStaleCapExceeded) {
+      currentLogs.push(`[Cache] Serving cached search results (${cacheAgeMinutes} mins old).`);
+      lastResult = entry.result;
+      return res.json({
+        status: "completed",
+        isCached: true,
+        cacheAgeMinutes,
+        circuitBreakerState: breakerState.currentState,
+        options,
+        result: entry.result,
+      });
+    }
+
+    // Cache is missing or older than 180 minutes staleness cap
+    currentLogs.push(`[Cache STALE CAP] No cache available or cache older than ${MAX_CACHE_AGE_MINUTES} mins.`);
+    return res.status(200).json({
+      status: "blocked",
+      isCached: false,
+      noFreshDataAvailable: true,
+      circuitBreakerState: breakerState.currentState,
+      message: "Naukri temporarily unreachable, no recent results available — try again later.",
+      logs: currentLogs,
+    });
+  }
+
+  // Live Scrape Execution
   isRunning = true;
   currentLogs = [];
   lastResult = null;
 
-  // Return the completed result through this same request. Keeping search
-  // state only in process memory is unreliable in production: a restarted or
-  // load-balanced instance makes a later /api/status poll see empty globals.
   try {
     const result = await runJobSearch(options, (logMsg) => {
       currentLogs.push(logMsg);
     });
+
+    await circuitBreaker.recordSuccess();
+    await cacheStore.setCache(cacheKey, options, result);
+
     lastResult = result;
     isRunning = false;
-    return res.json({ status: "completed", options, result });
+
+    return res.json({
+      status: "completed",
+      isCached: false,
+      circuitBreakerState: "CLOSED",
+      options,
+      result,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    currentLogs.push(`[ERROR] Search failed: ${message}`);
+    const isStructural = err instanceof StructuralBlockError || message.includes("blocked at IP level") || message.includes("STRUCTURAL BLOCK");
+
+    if (isStructural) {
+      await circuitBreaker.recordFailure(message);
+    }
+
+    currentLogs.push(`[ERROR] Live search failed: ${message}`);
     isRunning = false;
-    return res.status(500).json({ error: message, logs: currentLogs });
+
+    // Check if cached result exists to serve as fallback despite error
+    const { entry, isStaleCapExceeded, cacheAgeMinutes } = await cacheStore.getCache(cacheKey);
+
+    if (entry && !isStaleCapExceeded) {
+      currentLogs.push(`[Cache Fallback] Serving cached search results (${cacheAgeMinutes} mins old) after live scrape block.`);
+      lastResult = entry.result;
+      const breakerState = await circuitBreaker.getStatus();
+      return res.json({
+        status: "completed",
+        isCached: true,
+        cacheAgeMinutes,
+        circuitBreakerState: breakerState.currentState,
+        options,
+        result: entry.result,
+      });
+    }
+
+    const breakerState = await circuitBreaker.getStatus();
+    return res.status(200).json({
+      status: "blocked",
+      isCached: false,
+      noFreshDataAvailable: true,
+      circuitBreakerState: breakerState.currentState,
+      error: message,
+      message: "Naukri temporarily unreachable, no recent results available — try again later.",
+      logs: currentLogs,
+    });
   }
 });
+
+// --- Circuit Breaker Test Endpoints (Gated for non-production environments) ---
+const testRouteMiddleware = (req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (process.env.NODE_ENV === "production") {
+    return res.status(403).json({ error: "Forbidden: Test endpoints are disabled in production!" });
+  }
+  next();
+};
+
+app.post("/api/test/trip-breaker", testRouteMiddleware, async (req, res) => {
+  await circuitBreaker.testTripCircuitBreaker();
+  const status = await circuitBreaker.getStatus();
+  res.json({ message: "Circuit breaker tripped to OPEN", breaker: status });
+});
+
+app.post("/api/test/fast-forward-breaker", testRouteMiddleware, async (req, res) => {
+  await circuitBreaker.testFastForwardCooldown();
+  const status = await circuitBreaker.getStatus();
+  res.json({ message: "Circuit breaker fast-forwarded to HALF_OPEN", breaker: status });
+});
+
+app.post("/api/test/reset-breaker", testRouteMiddleware, async (req, res) => {
+  await circuitBreaker.resetCircuitBreaker();
+  const status = await circuitBreaker.getStatus();
+  res.json({ message: "Circuit breaker reset to CLOSED", breaker: status });
+});
+
+// Start Canary Health Background Monitor
+canaryMonitor.start(12);
 
 app.listen(Number(PORT), "0.0.0.0", () => {
   console.log("\n==================================================");
   console.log(`🚀 JobPilot Web UI is live on port: ${PORT}`);
+  console.log(`📡 Redis Configured: ${cacheStore.isRedisConfigured()}`);
   console.log("==================================================\n");
 });

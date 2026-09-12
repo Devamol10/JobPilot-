@@ -1,13 +1,50 @@
-import { chromium as extraChromium } from "playwright-extra";
-import StealthPlugin from "puppeteer-extra-plugin-stealth";
-import { Page } from "playwright";
+import { chromium, Page } from "playwright";
 import { rankJobs, FinalRankedJob } from "./ranker";
 import fs from "fs";
 import os from "os";
 import path from "path";
 
-const stealth = StealthPlugin();
-extraChromium.use(stealth);
+export class StructuralBlockError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StructuralBlockError";
+  }
+}
+
+export async function isGenuineBlock(page: Page, statusCode?: number): Promise<boolean> {
+  if (statusCode === 403 || statusCode === 503) {
+    return true;
+  }
+
+  const url = page.url();
+  if (!url || url === "about:blank") {
+    return false;
+  }
+
+  const title = (await page.title().catch(() => "")).trim().toLowerCase();
+  const signatures = ["access denied", "just a moment", "attention required", "cf-browser-verification", "enable javascript"];
+  if (signatures.some((s) => title.includes(s))) {
+    return true;
+  }
+
+  const bodyText = (await page.evaluate(() => document.body?.innerText || "").catch(() => "")).trim().toLowerCase();
+  if (signatures.some((s) => bodyText.includes(s))) {
+    return true;
+  }
+
+  // Status 200 on naukri.com with no block signatures is a valid response, not an IP block!
+  if (statusCode === 200 || url.includes("naukri.com")) {
+    return false;
+  }
+
+  return false;
+}
+
+export function looksBlocked(title: string, statusCode?: number): boolean {
+  const t = (title || "").trim().toLowerCase();
+  const signatures = ["access denied", "just a moment", "attention required", "cf-browser-verification"];
+  return signatures.some((s) => t.includes(s)) || statusCode === 403 || statusCode === 503;
+}
 
 
 export interface SearchOptions {
@@ -424,34 +461,21 @@ export async function runJobSearch(
   log(`[Config] Keywords: ${options.keywords.join(", ")} | Headless: ${options.headless}`);
   log(`[Config] Filters: Rating >= ${options.minRating ?? "Any"}, Reviews >= ${options.minReviews ?? "Any"}, Stipend >= ₹${options.minStipend ?? "Any"}, Max Age <= ${options.maxDaysOld ?? "Any"} days`);
 
+  let browser;
   let context;
-  const launchOptions = {
-    headless: options.headless,
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    args: [
-      "--disable-blink-features=AutomationControlled",
-      "--no-sandbox",
-      "--disable-setuid-sandbox",
-      "--disable-dev-shm-usage",
-      "--disable-accelerated-2d-canvas",
-      "--disable-gpu",
-      "--window-size=1920,1080",
-    ],
-    viewport: { width: 1280, height: 800 },
-  };
-
-  const profileDir = path.join(os.tmpdir(), "jobpilot-browser-profile");
-  if (!fs.existsSync(profileDir)) {
-    fs.mkdirSync(profileDir, { recursive: true });
+  const proxyConfig = process.env.PROXY_URL ? { server: process.env.PROXY_URL } : undefined;
+  if (proxyConfig) {
+    log(`[Proxy] Using configured proxy: ${process.env.PROXY_URL}`);
   }
-
   try {
-    context = await extraChromium.launchPersistentContext(profileDir, {
-      ...launchOptions,
+    browser = await chromium.launch({ headless: options.headless, proxy: proxyConfig });
+    context = await browser.newContext({
+      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+      viewport: { width: 1280, height: 800 },
     });
   } catch (err) {
-    context = await extraChromium.launchPersistentContext(profileDir, launchOptions);
+    browser = await chromium.launch({ headless: true, proxy: proxyConfig });
+    context = await browser.newContext();
   }
 
   // Stealth polyfill for esbuild __name helper inside browser context
@@ -491,12 +515,6 @@ export async function runJobSearch(
   });
 
   const page = await context.newPage();
-  await page.setExtraHTTPHeaders({
-    "Accept-Language": "en-IN,en-GB;q=0.9,en;q=0.8",
-    "appid": "109",
-    "systemid": "109",
-    "clientid": "d353138c7dfa8018e655a6242131ef57",
-  });
 
   // JSON responses are the primary listing source; React card rendering is
   // asynchronous and selector-dependent.
@@ -558,48 +576,37 @@ export async function runJobSearch(
       await context.addCookies(formattedCookies).catch(() => {});
     }
 
-    await page.goto(directUrl, { waitUntil: "domcontentloaded" });
-    await page.waitForTimeout(3000);
+    const navResponse = await page.goto(directUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => null);
+    await page.waitForTimeout(2000);
 
-    // If still hit Access Denied, try homepage fallback navigation with human-like interactions
-    const initialTitle = await page.title();
-    if (initialTitle.toLowerCase().includes("access denied") || initialTitle.toLowerCase().includes("just a moment")) {
-      log(`[Warning] Direct navigation hit Cloudflare protection ("${initialTitle}"). Attempting fallback navigation via homepage...`);
-      await page.goto("https://www.naukri.com/", { waitUntil: "domcontentloaded" });
+    const initialStatus = navResponse?.status();
+    const isDirectBlocked = await isGenuineBlock(page, initialStatus);
+
+    if (isDirectBlocked) {
+      const initialTitle = await page.title().catch(() => "");
+      log(`[Warning] Direct navigation blocked (Title: "${initialTitle}", Status: ${initialStatus ?? "N/A"}). Retrying via homepage...`);
+      const hpResponse = await page.goto("https://www.naukri.com/", { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => null);
       await page.waitForTimeout(2500);
 
-      const searchJobsBtn = page.getByRole("button", { name: "Search jobs here" })
-        .or(page.locator('.qsb-title, .suggestor-input'))
-        .first();
+      const hpStatus = hpResponse?.status();
+      const isHpBlocked = await isGenuineBlock(page, hpStatus);
 
-      if (await searchJobsBtn.isVisible().catch(() => false)) {
-        await searchJobsBtn.click().catch(() => {});
-        await page.waitForTimeout(800);
+      if (isHpBlocked) {
+        const hpTitle = await page.title().catch(() => "");
+        log(`[STRUCTURAL BLOCK] Homepage is also blocked (Title: "${hpTitle}", Status: ${hpStatus ?? "N/A"}). Server IP flagged — naukri.com blocked at IP level.`);
+        throw new StructuralBlockError("naukri.com blocked at IP level — run client-side or use proxy");
       }
+    }
 
-      const keywordInput = page.getByPlaceholder("Enter keyword / designation / companies")
-        .or(page.locator('input[placeholder*="keyword"]'))
-        .or(page.locator('.suggestor-input input'))
-        .first();
+    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple, div.tuple";
 
-      if (await keywordInput.isVisible().catch(() => false)) {
-        await keywordInput.click().catch(() => {});
-        await page.waitForTimeout(300);
-        for (const char of keyword) {
-          await keywordInput.press(char);
-          await page.waitForTimeout(40 + Math.floor(Math.random() * 60));
-        }
-        await page.waitForTimeout(600);
-
-        const searchBtn = page.getByRole("button", { name: "Search", exact: true })
-          .or(page.locator('button:has-text("Search"), .qsbSubmit'))
-          .first();
-
-        if (await searchBtn.isVisible().catch(() => false)) {
-          await searchBtn.click().catch(() => {});
-          await page.waitForTimeout(4000);
-        }
-      }
+    // If direct navigation yielded 0 listings, trigger Fallback Tier 3 query search URL
+    const initialTuplesCount = await page.locator(cardSelector).count().catch(() => 0);
+    if (initialTuplesCount === 0 && !apiListingsByPage.has(1)) {
+      const queryUrl = `https://www.naukri.com/jobs-in-india?k=${encodeURIComponent(keyword)}${options.jobType === "internship" ? "&jobType=internship" : ""}`;
+      log(`[Navigation Fallback Tier 3] Direct navigation yielded 0 listings. Navigating to Query Search SRP: ${queryUrl}`);
+      await page.goto(queryUrl, { waitUntil: "domcontentloaded", timeout: 30000 }).catch(() => null);
+      await page.waitForTimeout(3000);
     }
 
     try {
@@ -616,13 +623,11 @@ export async function runJobSearch(
     const allJobListings: any[] = [];
     let pageNumber = 1;
 
-    const cardSelector = ".srp-jobtuple-wrapper, div.cust-job-tuple, article.jobTuple, div.jobTuple, [data-job-id], div.srp-tuple-box, .styles_job-listing-container__tuple, div.tuple";
-
     while (pageNumber <= options.maxPages) {
       try {
         // API capture is authoritative. This probe is only a diagnostic fallback.
         if (!apiListingsByPage.has(pageNumber)) {
-          await page.waitForSelector(cardSelector, { timeout: 100 });
+          await page.waitForSelector(cardSelector, { timeout: 8000 });
         }
       } catch (e) {
         log(`[Debug] Page ${pageNumber} → 0 listings extracted. Title: "${await page.title()}", URL: ${page.url()}`);
@@ -781,6 +786,13 @@ export async function runJobSearch(
     }
     const jobListings = Array.from(uniqueListingMap.values());
 
+    // Sort merged results by posted date (newest first, i.e. lowest postedDaysAgo) before age filter evaluation
+    jobListings.sort((a, b) => {
+      const ageA = a.postedDaysAgo !== null && a.postedDaysAgo !== undefined ? a.postedDaysAgo : 999;
+      const ageB = b.postedDaysAgo !== null && b.postedDaysAgo !== undefined ? b.postedDaysAgo : 999;
+      return ageA - ageB;
+    });
+
     const rejectionCounts: Record<string, number> = {};
     const evaluatedListings = jobListings.map((job) => {
       const reasons = evaluateListingFilters(job, options);
@@ -893,7 +905,7 @@ export async function runJobSearch(
 
   // Browser shutdown is cleanup, not part of producing the result. A cleanup
   // failure must not discard already-qualified jobs before the API returns.
-  await context.close().catch((err) => {
+  await browser?.close().catch((err) => {
     log(`[Warning] Browser cleanup failed after ranking: ${err instanceof Error ? err.message : String(err)}`);
   });
 
